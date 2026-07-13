@@ -703,6 +703,196 @@ def refine_draft_with_gemini(
 
 
 # ──────────────────────────────────────────────
+# Gemini 오탈자·맞춤법 검사
+# ──────────────────────────────────────────────
+PROOFREAD_SYSTEM_PROMPT = """너는 한국어 맞춤법·표기 교정 전문가이자 고등학교 생기부 감수자다.
+주어진 텍스트에서 오탈자, 맞춤법 오류, 띄어쓰기 오류, 조사 오용, 명백한 단어 중복을 찾아라.
+
+[주의]
+- 생기부 특유의 개조식 명사형 어미('~함', '~임', '~보임' 등)는 오류가 아니다.
+- 문장 스타일이나 내용에 대한 제안은 하지 않는다. 표기 오류만 찾는다.
+
+[출력 규칙 - 반드시 준수]
+- JSON 배열로만 반환한다. 다른 설명을 붙이지 않는다.
+- 각 항목: {"wrong": "원문 그대로의 오류 부분", "correct": "교정안", "reason": "오류 유형 한 줄"}
+- "wrong"은 원문 텍스트와 완전히 동일한 문자열이어야 한다.
+- 오류가 없으면 빈 배열 []을 반환한다.
+"""
+
+
+def proofread_with_gemini(text: str, api_key: str) -> list[dict]:
+    """텍스트의 오탈자·맞춤법 오류 목록(JSON)을 받아온다."""
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        model_name=GEMINI_MODEL,
+        system_instruction=PROOFREAD_SYSTEM_PROMPT,
+        generation_config={
+            "temperature": 0.1,
+            "response_mime_type": "application/json",
+        },
+    )
+    response = model.generate_content(
+        f"[검사 대상 텍스트]\n{text}\n\n오탈자·표기 오류를 JSON 배열로만 답하라."
+    )
+    raw = re.sub(
+        r"^```(?:json)?\s*|\s*```$", "", response.text.strip(), flags=re.MULTILINE
+    ).strip()
+    parsed = json.loads(raw)
+    if not isinstance(parsed, list):
+        raise ValueError("Gemini 응답이 JSON 배열 형식이 아닙니다.")
+    return [
+        {
+            "wrong": str(i.get("wrong", "")).strip(),
+            "correct": str(i.get("correct", "")).strip(),
+            "reason": str(i.get("reason", "")).strip(),
+        }
+        for i in parsed
+        if isinstance(i, dict) and i.get("wrong")
+    ]
+
+
+def render_proofread_block(
+    text: str, api_key: str, mask_map: list[tuple[str, str]], state_key: str
+) -> None:
+    """오탈자 검사 실행 버튼 + 결과(표·하이라이트·교정 반영본) 표시 블록."""
+    st.subheader("🔤 오탈자·맞춤법 검사")
+    st.caption("오탈자·맞춤법·띄어쓰기·조사 오용을 검사합니다. 개조식 어미는 오류로 보지 않습니다.")
+    if st.button("오탈자 검사 실행", key=f"btn_{state_key}", use_container_width=True):
+        if not api_key.strip():
+            st.warning("⚠️ 서버에 Gemini API Key가 설정되지 않아 실행할 수 없습니다.")
+        else:
+            with st.spinner(f"오탈자 검사 중… ({GEMINI_MODEL})"):
+                try:
+                    items = proofread_with_gemini(apply_mask(text, mask_map), api_key)
+                    for it in items:
+                        it["wrong"] = remove_mask(it["wrong"], mask_map)
+                        it["correct"] = remove_mask(it["correct"], mask_map)
+                    st.session_state[state_key] = items
+                except Exception as e:
+                    st.error(f"❌ 오탈자 검사 실패: {e}")
+
+    items = st.session_state.get(state_key)
+    if items is None:
+        return
+    if not items:
+        st.success("✅ 발견된 오탈자가 없습니다.")
+        return
+
+    st.warning(f"오탈자·표기 오류 **{len(items)}건** 발견")
+    df = pd.DataFrame(items).rename(
+        columns={"wrong": "잘못된 표기", "correct": "교정안", "reason": "사유"}
+    )
+    st.dataframe(
+        df[["잘못된 표기", "교정안", "사유"]], use_container_width=True, hide_index=True
+    )
+
+    # 원문에서 실제로 위치를 찾은 항목만 하이라이트·자동 교정에 사용
+    found = [it for it in items if it["wrong"] and it["wrong"] in text]
+    if found:
+        render_highlight_box(text, [it["wrong"] for it in found])
+        corrected = text
+        for it in found:
+            corrected = corrected.replace(it["wrong"], it["correct"])
+        st.text_area(
+            "교정 반영본 (복사해서 사용하세요)",
+            value=corrected,
+            height=200,
+            key=f"ta_{state_key}",
+        )
+    missing = len(items) - len(found)
+    if missing:
+        st.caption(f"ℹ️ {missing}건은 원문에서 정확한 위치를 찾지 못해 표로만 표시했습니다.")
+
+
+# ──────────────────────────────────────────────
+# Gemini 분량 조절 (줄이기/늘리기)
+# ──────────────────────────────────────────────
+ADJUST_SYSTEM_PROMPT = """너는 대한민국 고등학교 교사이며 생기부 문장 분량 조절 전문가다.
+원문의 사실·내용·개조식 문체를 그대로 유지하면서 목표 글자 수(공백 포함)에 맞게 본문을 줄이거나 늘린다.
+
+[조절 원칙]
+1. 줄일 때: 중복 표현과 군더더기 수식어를 먼저 정리하고, 핵심 사실·활동·성장 서술은 유지한다.
+2. 늘릴 때: 원문에 없는 새로운 사실(수치, 자료명, 활동, 수상 등)을 지어내지 않는다.
+   이미 있는 내용의 과정·의미·배운 점을 자연스럽게 풀어 쓴다.
+3. 개조식 명사형 어미와 문장 순서를 최대한 유지한다.
+4. 목표 글자 수 ±5% 이내로 맞춘다.
+
+[출력 규칙]
+- 조절된 본문만 출력한다. 설명·제목·서식을 붙이지 않는다.
+"""
+
+
+def adjust_length_with_gemini(text: str, target_len: int, api_key: str) -> str:
+    """본문을 목표 글자 수(공백 포함)에 맞게 조절한다. 크게 벗어나면 1회 재조정."""
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        model_name=GEMINI_MODEL,
+        system_instruction=ADJUST_SYSTEM_PROMPT,
+        generation_config={"temperature": 0.3},
+    )
+    prompt = (
+        f"[원문 — 공백 포함 {len(text)}자]\n{text}\n\n"
+        f"[목표 분량]\n공백 포함 {target_len}자 (±5% 이내)\n\n"
+        "조절된 본문만 출력하라."
+    )
+    result = model.generate_content(prompt).text.strip()
+
+    if target_len and abs(len(result) - target_len) / target_len > 0.10:
+        direction = "더 줄여라" if len(result) > target_len else "더 늘려라"
+        retry_prompt = (
+            f"[원문 — 공백 포함 {len(result)}자]\n{result}\n\n"
+            f"[목표 분량]\n공백 포함 {target_len}자 (±5% 이내). "
+            f"현재 {len(result)}자이므로 {direction}.\n\n"
+            "조절된 본문만 출력하라."
+        )
+        result = model.generate_content(retry_prompt).text.strip()
+    return result
+
+
+def render_length_adjuster(
+    state_key: str,
+    api_key: str,
+    mask_map: list[tuple[str, str]],
+    default_len: int,
+    widget_key: str,
+    clear_keys: tuple[str, ...] = (),
+) -> None:
+    """세션 상태 state_key에 저장된 본문의 분량을 목표 글자 수로 조절해 제자리 교체한다."""
+    text = st.session_state.get(state_key, "")
+    if not text:
+        return
+    st.markdown("**📏 분량 조절 (줄이기/늘리기)**")
+    c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
+    target = c1.number_input(
+        "목표 글자 수 (공백 포함)",
+        min_value=100,
+        max_value=3000,
+        value=min(max(default_len or len(text), 100), 3000),
+        step=10,
+        key=f"len_{widget_key}",
+    )
+    if c2.button("✂️ 분량 맞추기", key=f"adj_{widget_key}", use_container_width=True):
+        if not api_key.strip():
+            st.warning("⚠️ 서버에 Gemini API Key가 설정되지 않아 실행할 수 없습니다.")
+        else:
+            with st.spinner(f"분량 조절 중… ({GEMINI_MODEL})"):
+                try:
+                    adjusted = adjust_length_with_gemini(
+                        apply_mask(text, mask_map), int(target), api_key
+                    )
+                    st.session_state[state_key] = remove_mask(adjusted, mask_map)
+                    for k in clear_keys:
+                        st.session_state.pop(k, None)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ 분량 조절 실패: {e}")
+    st.caption(
+        f"현재 **{len(text):,}자** → 목표 {int(target):,}자. "
+        "조절하면 본문이 새 버전으로 교체됩니다 (사실 추가 없이 줄이기/풀어쓰기)."
+    )
+
+
+# ──────────────────────────────────────────────
 # 하이라이트 렌더링 / 분량 표시
 # ──────────────────────────────────────────────
 HIGHLIGHT_STYLE = "background-color: yellow; color: red; font-weight: bold;"
@@ -979,6 +1169,7 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state.pop("review_result", None)
             st.session_state.pop("revised_text", None)
             st.session_state.pop("quality_review", None)
+            st.session_state.pop("proofread_review", None)
 
             batch_reviews = []
             progress = st.progress(0.0, text="일괄 검토 중…")
@@ -1011,6 +1202,7 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state.pop("batch_review", None)
             st.session_state.pop("quality_review", None)
             st.session_state.pop("revised_text", None)
+            st.session_state.pop("proofread_review", None)
 
             with st.spinner(f"규칙 기반 필터링 + Gemini 문맥 심사 중… ({GEMINI_MODEL})"):
                 try:
@@ -1061,6 +1253,9 @@ if mode == "🔍 기재 금지 표현 검토":
             if revised:
                 st.text_area("수정본 (복사해서 사용하세요)", value=revised, height=250)
                 render_length_metrics(revised, neis_limit)
+                render_length_adjuster(
+                    "revised_text", api_key, mask_map, neis_limit, "revised"
+                )
 
                 recheck = rule_based_filter(revised, custom_words)
                 if recheck:
@@ -1082,6 +1277,9 @@ if mode == "🔍 기재 금지 표현 검토":
         render_quality_block(
             apply_mask(review["text"], mask_map), major, api_key, "quality_review"
         )
+
+        st.divider()
+        render_proofread_block(review["text"], api_key, mask_map, "proofread_review")
 
     # ── 일괄 검토 결과 렌더링 ──
     batch_review = st.session_state.get("batch_review")
@@ -1227,6 +1425,7 @@ else:
         st.session_state.pop("draft_text", None)
         st.session_state.pop("batch_drafts", None)
         st.session_state.pop("quality_draft", None)
+        st.session_state.pop("proofread_draft", None)
 
         if len(eval_files) > 1:
             # ── 일괄 생성 ──
@@ -1279,6 +1478,14 @@ else:
 
         st.text_area("초안 (복사해서 사용하세요)", value=draft, height=280)
         render_length_metrics(draft, neis_limit)
+        render_length_adjuster(
+            "draft_text",
+            api_key,
+            mask_map,
+            target_len,
+            "draft",
+            clear_keys=("quality_draft", "proofread_draft"),
+        )
         render_style_warnings(draft)
 
         draft_findings = rule_based_filter(draft, custom_words)
@@ -1320,6 +1527,7 @@ else:
                         )
                         st.session_state["draft_text"] = remove_mask(refined, mask_map)
                         st.session_state.pop("quality_draft", None)
+                        st.session_state.pop("proofread_draft", None)
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ Gemini API 호출 실패: {e}")
@@ -1328,6 +1536,9 @@ else:
         render_quality_block(
             apply_mask(draft, mask_map), major, api_key, "quality_draft"
         )
+
+        st.divider()
+        render_proofread_block(draft, api_key, mask_map, "proofread_draft")
 
         st.info(
             "💡 완성된 초안은 **🔍 기재 금지 표현 검토** 모드에 붙여넣으면 "
