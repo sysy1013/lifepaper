@@ -857,28 +857,57 @@ def render_length_adjuster(
     widget_key: str,
     clear_keys: tuple[str, ...] = (),
 ) -> None:
-    """세션 상태 state_key에 저장된 본문의 분량을 목표 글자 수로 조절해 제자리 교체한다."""
+    """세션 상태 state_key에 저장된 본문의 분량을 글자 수 또는 바이트 기준으로 조절한다."""
     text = st.session_state.get(state_key, "")
     if not text:
         return
+    cur_chars = len(text)
+    cur_bytes = len(text.encode("utf-8"))
+
     st.markdown("**📏 분량 조절 (줄이기/늘리기)**")
-    c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
-    target = c1.number_input(
-        "목표 글자 수 (공백 포함)",
-        min_value=100,
-        max_value=3000,
-        value=min(max(default_len or len(text), 100), 3000),
-        step=10,
-        key=f"len_{widget_key}",
+    unit = st.radio(
+        "조절 기준",
+        ["글자 수 (공백 포함)", "바이트 (UTF-8 · 한글 3byte)"],
+        horizontal=True,
+        key=f"unit_{widget_key}",
     )
+    by_bytes = unit.startswith("바이트")
+
+    c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
+    if by_bytes:
+        target = c1.number_input(
+            "목표 바이트",
+            min_value=300,
+            max_value=9000,
+            value=min(max((default_len or cur_chars) * 3, 300), 9000),
+            step=30,
+            key=f"len_b_{widget_key}",
+        )
+    else:
+        target = c1.number_input(
+            "목표 글자 수 (공백 포함)",
+            min_value=100,
+            max_value=3000,
+            value=min(max(default_len or cur_chars, 100), 3000),
+            step=10,
+            key=f"len_{widget_key}",
+        )
+
     if c2.button("✂️ 분량 맞추기", key=f"adj_{widget_key}", use_container_width=True):
         if not api_key.strip():
             st.warning("⚠️ 서버에 Gemini API Key가 설정되지 않아 실행할 수 없습니다.")
         else:
+            if by_bytes:
+                # Gemini는 바이트를 직접 세지 못하므로 현재 본문의 글자당 바이트 비율로 환산
+                char_target = max(
+                    int(round(int(target) * cur_chars / max(cur_bytes, 1))), 50
+                )
+            else:
+                char_target = int(target)
             with st.spinner(f"분량 조절 중… ({GEMINI_MODEL})"):
                 try:
                     adjusted = adjust_length_with_gemini(
-                        apply_mask(text, mask_map), int(target), api_key
+                        apply_mask(text, mask_map), char_target, api_key
                     )
                     st.session_state[state_key] = remove_mask(adjusted, mask_map)
                     for k in clear_keys:
@@ -886,10 +915,17 @@ def render_length_adjuster(
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ 분량 조절 실패: {e}")
-    st.caption(
-        f"현재 **{len(text):,}자** → 목표 {int(target):,}자. "
-        "조절하면 본문이 새 버전으로 교체됩니다 (사실 추가 없이 줄이기/풀어쓰기)."
-    )
+
+    if by_bytes:
+        st.caption(
+            f"현재 **{cur_bytes:,} byte** ({cur_chars:,}자) → 목표 {int(target):,} byte. "
+            "조절하면 본문이 새 버전으로 교체됩니다 (사실 추가 없이 줄이기/풀어쓰기)."
+        )
+    else:
+        st.caption(
+            f"현재 **{cur_chars:,}자** ({cur_bytes:,} byte) → 목표 {int(target):,}자. "
+            "조절하면 본문이 새 버전으로 교체됩니다 (사실 추가 없이 줄이기/풀어쓰기)."
+        )
 
 
 # ──────────────────────────────────────────────
@@ -1217,6 +1253,11 @@ if mode == "🔍 기재 금지 표현 검토":
                     st.error("❌ Gemini 응답을 JSON으로 파싱하지 못했습니다. 다시 시도해 주세요.")
                 except Exception as e:
                     st.error(f"❌ Gemini API 호출 실패: {e}")
+
+    # ── 검토 실행 전에도 입력 텍스트만으로 오탈자 검사 가능 ──
+    if input_text.strip() and not st.session_state.get("review_result"):
+        st.divider()
+        render_proofread_block(input_text, api_key, mask_map, "proofread_review")
 
     # ── 단일 검토 결과 렌더링 ──
     review = st.session_state.get("review_result")
