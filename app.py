@@ -21,11 +21,12 @@ import json
 import re
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
-from core.formatting import findings_to_df, highlight_text
+from core.formatting import build_student_report, findings_to_df, highlight_text
 from core.gemini import (
     GEMINI_MODEL,
     adjust_length_with_gemini,
@@ -58,6 +59,19 @@ st.set_page_config(
 
 # 일괄 처리 동시 호출 수 (무료 쿼터에서도 429는 재시도로 흡수)
 BATCH_WORKERS = 4
+
+
+def record_history(label: str, content: str) -> None:
+    """세션 이력에 결과를 기록한다 (최대 20건, 오래된 것부터 삭제)."""
+    hist = st.session_state.setdefault("history", [])
+    hist.append(
+        {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "label": label,
+            "content": content,
+        }
+    )
+    del hist[:-20]
 
 
 def run_parallel(n: int, job, label: str) -> list:
@@ -485,6 +499,27 @@ with st.sidebar:
         "➕ 유사도 검사: 학생 간 동일·유사 문장"
     )
 
+    # 세션 작업 이력
+    # 참고: 사이드바는 모드 본문보다 먼저 렌더링되므로, 이번 실행에서 기록된
+    # 이력은 다음 rerun 때 이 목록에 나타난다 (의도된 동작).
+    st.divider()
+    with st.expander("🕘 이번 세션 작업 이력", expanded=False):
+        history = st.session_state.get("history", [])
+        if not history:
+            st.caption("아직 기록이 없습니다.")
+        else:
+            for i, h in enumerate(reversed(history)):
+                st.caption(f"{h['time']} — {h['label']}")
+                if h["content"]:
+                    safe_name = re.sub(r'[\\/:*?"<>|]', "_", h["label"])
+                    st.download_button(
+                        "TXT",
+                        data=h["content"].encode("utf-8"),
+                        file_name=f"{safe_name}.txt",
+                        mime="text/plain",
+                        key=f"hist_{i}",
+                    )
+
 # ── 모드 선택 ──
 mode = st.radio(
     "모드를 선택하세요.",
@@ -572,6 +607,7 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state["batch_review"] = run_parallel(
                 len(inputs), _review_job, "일괄 검토 중…"
             )
+            record_history(f"일괄 검토 {len(inputs)}건", "")
         else:
             # ── 단일 검토 ──
             if not input_text.strip():
@@ -592,6 +628,7 @@ if mode == "🔍 기재 금지 표현 검토":
                         "text": input_text,
                         "findings": findings,
                     }
+                    record_history(f"검토: {len(findings)}건 검출", input_text)
                 except json.JSONDecodeError:
                     st.error("❌ Gemini 응답을 JSON으로 파싱하지 못했습니다. 다시 시도해 주세요.")
                 except Exception as e:
@@ -630,6 +667,7 @@ if mode == "🔍 기재 금지 표현 검토":
                         st.session_state["revised_text"] = remove_mask(
                             revised, mask_map
                         )
+                        record_history("수정본", st.session_state["revised_text"])
                     except Exception as e:
                         st.error(f"❌ Gemini API 호출 실패: {e}")
 
@@ -811,6 +849,22 @@ if mode == "🔍 기재 금지 표현 검토":
                 mime="application/zip",
             )
 
+        # 개인별 종합 리포트 ZIP (검출/수정본/품질/오탈자 등 실행된 결과 모두 포함)
+        if ok:
+            report_buf = io.BytesIO()
+            with zipfile.ZipFile(report_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for b in ok:
+                    zf.writestr(
+                        f"{b['name']}_리포트.txt",
+                        build_student_report(b, neis_limit),
+                    )
+            st.download_button(
+                "📥 개인별 종합 리포트 ZIP 다운로드",
+                data=report_buf.getvalue(),
+                file_name="생기부_개인별_리포트.zip",
+                mime="application/zip",
+            )
+
         # 학생 간 유사도 검사
         st.subheader("👥 학생 간 유사도 검사")
         render_similarity_check([(b["name"], b["text"]) for b in ok])
@@ -981,6 +1035,7 @@ else:
             st.session_state["batch_drafts"] = run_parallel(
                 len(inputs), _draft_job, "일괄 초안 생성 중…"
             )
+            record_history(f"일괄 초안 {len(inputs)}건", "")
         else:
             # ── 단일 생성 ──
             with st.spinner(f"세특 초안 생성 중… ({GEMINI_MODEL})"):
@@ -994,6 +1049,9 @@ else:
                         api_key,
                     )
                     st.session_state["draft_text"] = remove_mask(draft, mask_map)
+                    record_history(
+                        f"초안: {subject or '무제'}", st.session_state["draft_text"]
+                    )
                     # 재생성 시 원자료 맥락 전달용 (마스킹된 상태로 보관)
                     st.session_state["draft_context"] = {
                         "subject": subject.strip(),
@@ -1060,6 +1118,9 @@ else:
                             context=st.session_state.get("draft_context"),
                         )
                         st.session_state["draft_text"] = remove_mask(refined, mask_map)
+                        record_history(
+                            "초안(피드백 반영)", st.session_state["draft_text"]
+                        )
                         st.session_state.pop("quality_draft", None)
                         st.session_state.pop("proofread_draft", None)
                         st.rerun()

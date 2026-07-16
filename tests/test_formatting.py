@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from core.formatting import findings_to_df, highlight_text
+from core.formatting import build_student_report, findings_to_df, highlight_text
 
 
 def test_highlight_wraps_matched_word_in_span():
@@ -63,3 +63,85 @@ def test_findings_to_df_fills_missing_severity_and_source():
     )
     assert df.iloc[0]["구분"] == "위반"
     assert df.iloc[0]["검출 단계"] == "-"
+
+
+def _full_report_dict():
+    return {
+        "name": "20301_홍길동",
+        "text": "의사인 아버지의 영향을 받아 TOEIC 900점을 취득함.",
+        "findings": [
+            {
+                "word": "TOEIC",
+                "reason": "공인어학시험",
+                "severity": "위반",
+                "suggestion_1": "영어 실력",
+                "suggestion_2": "영어 역량",
+            }
+        ],
+        "revised": "영어 역량을 꾸준히 길러 온 학생임.",
+        "quality": {
+            "scores": [
+                {"criterion": "구체성", "score": 4, "comment": "구체적임"},
+                {"criterion": "개별성", "score": 3, "comment": "보통"},
+            ],
+            "overall": "전반적으로 양호함",
+            "improvements": ["탐구 과정 보강", "진로 연계 강화"],
+        },
+        "proofread": [
+            {"wrong": "취득함", "correct": "취득하였음", "reason": "어미"},
+        ],
+    }
+
+
+def test_build_student_report_full_renders_all_sections_in_order():
+    report = build_student_report(_full_report_dict(), neis_limit=1500)
+    # 헤더
+    assert "생기부 검토 리포트 — 20301_홍길동" in report
+    assert "글자 수 (공백 포함)" in report
+    assert "NEIS 제한 이내" in report
+    # 섹션 존재
+    assert "[검출된 기재 금지 표현]" in report
+    assert "「TOEIC」" in report
+    assert "영어 실력 / 영어 역량" in report
+    assert "[수정본]" in report
+    assert "영어 역량을 꾸준히" in report
+    assert "[품질 진단]" in report
+    assert "구체성 4/5" in report
+    assert "종합 평균" in report
+    assert "전반적으로 양호함" in report
+    assert "탐구 과정 보강" in report
+    assert "[오탈자]" in report
+    assert "취득함 → 취득하였음" in report
+    # 순서 확인
+    order = [
+        report.index("[검출된 기재 금지 표현]"),
+        report.index("[수정본]"),
+        report.index("[품질 진단]"),
+        report.index("[오탈자]"),
+    ]
+    assert order == sorted(order)
+
+
+def test_build_student_report_minimal_omits_optional_sections():
+    report = build_student_report(
+        {"name": "학생A", "text": "내용", "findings": []}
+    )
+    assert "[검출된 기재 금지 표현]" in report
+    assert "[수정본]" not in report
+    assert "[품질 진단]" not in report
+    assert "[오탈자]" not in report
+
+
+def test_build_student_report_empty_findings_shows_none():
+    report = build_student_report(
+        {"name": "학생A", "text": "내용", "findings": []}
+    )
+    assert "검출 없음" in report
+
+
+def test_build_student_report_empty_proofread_shows_no_typo_line():
+    report = build_student_report(
+        {"name": "학생A", "text": "내용", "findings": [], "proofread": []}
+    )
+    assert "[오탈자]" in report
+    assert "발견된 오탈자 없음" in report

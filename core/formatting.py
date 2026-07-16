@@ -37,6 +37,87 @@ def highlight_text(original: str, words: list[str]) -> str:
     return "".join(parts).replace("\n", "<br>")
 
 
+def build_student_report(b: dict, neis_limit: int = 0) -> str:
+    """일괄 검토 결과 dict 하나를 학생별 종합 리포트(plain text)로 조립한다.
+
+    b 키: name, text, findings(list), 선택적 revised / quality / proofread.
+    dict에 없는 섹션은 리포트에서 통째로 생략한다.
+    """
+    div = "─" * 40
+    name = b.get("name", "")
+    text = b.get("text", "")
+    lines: list[str] = []
+
+    # 헤더
+    lines.append(f"생기부 검토 리포트 — {name}")
+    lines.append(f"글자 수 (공백 포함): {len(text):,}자")
+    if neis_limit > 0:
+        if len(text) > neis_limit:
+            lines.append(
+                f"NEIS 제한 초과: {len(text):,}자 / {neis_limit:,}자 "
+                f"({len(text) - neis_limit:,}자 초과)"
+            )
+        else:
+            lines.append(f"NEIS 제한 이내: {len(text):,}자 / {neis_limit:,}자")
+
+    # 검출된 기재 금지 표현
+    lines.append(div)
+    lines.append("[검출된 기재 금지 표현]")
+    findings = b.get("findings", [])
+    if findings:
+        for f in findings:
+            sev = f.get("severity", "위반")
+            lines.append(
+                f"- 「{f.get('word', '')}」 ({sev}/{f.get('reason', '')}) "
+                f"→ 추천: {f.get('suggestion_1', '')} / {f.get('suggestion_2', '')}"
+            )
+    else:
+        lines.append("검출 없음")
+
+    # 수정본
+    if b.get("revised"):
+        lines.append(div)
+        lines.append("[수정본]")
+        lines.append(b["revised"])
+
+    # 품질 진단
+    q = b.get("quality")
+    if q:
+        lines.append(div)
+        lines.append("[품질 진단]")
+        scores = q.get("scores", [])
+        for s in scores:
+            lines.append(
+                f"{s.get('criterion', '')} {s.get('score', '-')}/5 — {s.get('comment', '')}"
+            )
+        if scores:
+            avg = sum(float(s.get("score", 0)) for s in scores) / len(scores)
+            lines.append(f"종합 평균: {avg:.1f} / 5.0")
+        if q.get("overall"):
+            lines.append(f"총평: {q['overall']}")
+        improvements = q.get("improvements", [])
+        if improvements:
+            lines.append("개선 제안:")
+            for i, imp in enumerate(improvements, 1):
+                lines.append(f"  {i}. {imp}")
+
+    # 오탈자
+    proofread = b.get("proofread")
+    if proofread is not None:
+        lines.append(div)
+        lines.append("[오탈자]")
+        if proofread:
+            for it in proofread:
+                lines.append(
+                    f"- {it.get('wrong', '')} → {it.get('correct', '')} "
+                    f"({it.get('reason', '')})"
+                )
+        else:
+            lines.append("발견된 오탈자 없음")
+
+    return "\n".join(lines)
+
+
 def findings_to_df(findings: list[dict]) -> pd.DataFrame:
     df = pd.DataFrame(findings)
     if "severity" not in df.columns:
