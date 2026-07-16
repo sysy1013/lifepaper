@@ -44,7 +44,13 @@ from core.masking import (
     remove_mask,
     suggest_mask_candidates,
 )
-from core.parsing import file_stem, read_uploaded_file, unique_names
+from core.parsing import (
+    file_stem,
+    guess_roster_columns,
+    parse_roster_table,
+    read_uploaded_file,
+    unique_names,
+)
 from core.rules import (
     NEIS_LIMITS,
     filter_ignored,
@@ -95,6 +101,26 @@ def run_parallel(n: int, job, label: str) -> list:
             progress.progress(done / n, text=f"{label} ({done}/{n})")
     progress.empty()
     return results
+
+
+def run_batch_review_pipeline(
+    inputs: list[tuple[str, str, str]], major, api_key, custom_words, mask_map
+) -> list:
+    """(stem, text, err) 입력 목록으로 병렬 일괄 검토를 실행한다.
+
+    여러 파일 업로드·명렬표 업로드가 동일한 파이프라인을 공유한다.
+    """
+    def _review_job(idx: int) -> dict:
+        stem, text, err = inputs[idx]
+        if err:
+            return {"name": stem, "text": "", "findings": [], "error": err}
+        try:
+            findings = review_text_masked(text, major, api_key, custom_words, mask_map)
+            return {"name": stem, "text": text, "findings": findings, "error": ""}
+        except Exception as e:
+            return {"name": stem, "text": "", "findings": [], "error": str(e)}
+
+    return run_parallel(len(inputs), _review_job, "일괄 검토 중…")
 
 
 # ──────────────────────────────────────────────
@@ -601,21 +627,62 @@ if mode == "🔍 기재 금지 표현 검토":
 
     input_method = st.radio(
         "입력 방식을 선택하세요.",
-        ["파일 업로드 (.txt / .hwp / .hwpx — 여러 개 가능)", "직접 붙여넣기"],
+        ["파일 업로드 (.txt / .hwp / .hwpx / .docx / 명렬표 .csv·.xlsx — 여러 개 가능)", "직접 붙여넣기"],
         horizontal=True,
     )
 
     input_text = ""
     review_files = []
+    # 명렬표(반 전체) 모드 상태
+    is_roster = False
+    roster_mixed = False
+    roster_df = None
+    roster_name_col = None
+    roster_text_col = None
 
     if input_method.startswith("파일 업로드"):
         review_files = st.file_uploader(
-            "생기부 파일을 업로드하세요. 여러 개 올리면 반 전체 일괄 검토가 됩니다.",
-            type=["txt", "hwp", "hwpx"],
+            "생기부 파일 또는 반 전체 명렬표(.csv/.xlsx)를 업로드하세요. "
+            "여러 개 올리면 반 전체 일괄 검토가 됩니다. 명렬표는 한 개만 단독으로 올려주세요.",
+            type=["txt", "hwp", "hwpx", "docx", "csv", "xlsx"],
             accept_multiple_files=True,
             key="review_files",
         )
-        if len(review_files) == 1:
+        spreadsheet_files = [
+            f for f in review_files if f.name.lower().endswith((".csv", ".xlsx"))
+        ]
+        if spreadsheet_files and len(review_files) > 1:
+            # 명렬표와 다른 파일이 섞여 있으면 실행하지 않는다.
+            roster_mixed = True
+            st.error("❌ 명렬표는 단독으로 업로드해 주세요.")
+        elif len(spreadsheet_files) == 1:
+            # ── 명렬표(반 전체) 모드 ──
+            is_roster = True
+            f = spreadsheet_files[0]
+            try:
+                if f.name.lower().endswith(".csv"):
+                    try:
+                        roster_df = pd.read_csv(io.BytesIO(f.getvalue()), encoding="utf-8")
+                    except UnicodeDecodeError:
+                        roster_df = pd.read_csv(io.BytesIO(f.getvalue()), encoding="cp949")
+                else:
+                    roster_df = pd.read_excel(io.BytesIO(f.getvalue()))
+            except Exception as e:
+                st.error(f"❌ 명렬표를 읽지 못했습니다: {e}")
+                roster_df = None
+            if roster_df is not None and not roster_df.empty:
+                st.success(f"✅ 명렬표 로드 완료 ({len(roster_df):,}행)")
+                st.dataframe(roster_df.head(5), use_container_width=True)
+                guess_name, guess_text = guess_roster_columns(roster_df)
+                cols = list(roster_df.columns)
+                c1, c2 = st.columns(2)
+                roster_name_col = c1.selectbox(
+                    "이름 열", cols, index=cols.index(guess_name), key="roster_name_col"
+                )
+                roster_text_col = c2.selectbox(
+                    "내용 열", cols, index=cols.index(guess_text), key="roster_text_col"
+                )
+        elif len(review_files) == 1:
             try:
                 input_text = read_uploaded_file(review_files[0])
                 st.success(f"✅ 파일 로드 완료 ({len(input_text):,}자)")
@@ -643,8 +710,32 @@ if mode == "🔍 기재 금지 표현 검토":
             st.warning("⚠️ 서버에 Gemini API Key가 설정되지 않아 실행할 수 없습니다.")
             st.stop()
 
-        if len(review_files) > 1:
-            # ── 일괄 검토 ──
+        if roster_mixed:
+            st.error("❌ 명렬표는 단독으로 업로드해 주세요. 명렬표만 남기고 다시 실행해 주세요.")
+            st.stop()
+
+        if is_roster:
+            # ── 명렬표(반 전체) 일괄 검토 ──
+            if roster_df is None or roster_df.empty:
+                st.warning("⚠️ 명렬표에서 읽을 데이터가 없습니다.")
+                st.stop()
+            entries = parse_roster_table(roster_df, roster_name_col, roster_text_col)
+            if not entries:
+                st.warning("⚠️ 이름·내용이 모두 채워진 행이 없습니다. 열 선택을 확인해 주세요.")
+                st.stop()
+
+            st.session_state.pop("review_result", None)
+            st.session_state.pop("revised_text", None)
+            st.session_state.pop("quality_review", None)
+            st.session_state.pop("proofread_review", None)
+
+            inputs = [(name, text, "") for name, text in entries]
+            st.session_state["batch_review"] = run_batch_review_pipeline(
+                inputs, major, api_key, custom_words, mask_map
+            )
+            record_history(f"명렬표 일괄 검토 {len(inputs)}건", "")
+        elif len(review_files) > 1:
+            # ── 일괄 검토 (여러 파일) ──
             st.session_state.pop("review_result", None)
             st.session_state.pop("revised_text", None)
             st.session_state.pop("quality_review", None)
@@ -653,27 +744,15 @@ if mode == "🔍 기재 금지 표현 검토":
             stems = unique_names([file_stem(f.name) for f in review_files])
 
             # 파일 읽기는 메인 스레드에서 (UploadedFile은 스레드 안전하지 않음)
-            inputs: list[tuple[str, str, str]] = []
+            inputs = []
             for f, stem in zip(review_files, stems):
                 try:
                     inputs.append((stem, read_uploaded_file(f), ""))
                 except Exception as e:
                     inputs.append((stem, "", str(e)))
 
-            def _review_job(idx: int) -> dict:
-                stem, text, err = inputs[idx]
-                if err:
-                    return {"name": stem, "text": "", "findings": [], "error": err}
-                try:
-                    findings = review_text_masked(
-                        text, major, api_key, custom_words, mask_map
-                    )
-                    return {"name": stem, "text": text, "findings": findings, "error": ""}
-                except Exception as e:
-                    return {"name": stem, "text": "", "findings": [], "error": str(e)}
-
-            st.session_state["batch_review"] = run_parallel(
-                len(inputs), _review_job, "일괄 검토 중…"
+            st.session_state["batch_review"] = run_batch_review_pipeline(
+                inputs, major, api_key, custom_words, mask_map
             )
             record_history(f"일괄 검토 {len(inputs)}건", "")
         else:
@@ -1028,8 +1107,8 @@ else:
     )
 
     eval_files = st.file_uploader(
-        "학생 자기평가서 업로드 (선택, .hwp / .hwpx / .txt — 여러 개 선택 가능)",
-        type=["hwp", "hwpx", "txt"],
+        "학생 자기평가서 업로드 (선택, .hwp / .hwpx / .txt / .docx — 여러 개 선택 가능)",
+        type=["hwp", "hwpx", "txt", "docx"],
         key="eval_files",
         accept_multiple_files=True,
         help="1개 업로드 시 단일 초안, 2개 이상 업로드 시 학생별 일괄 생성됩니다. "
