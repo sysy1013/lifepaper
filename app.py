@@ -1115,6 +1115,28 @@ else:
         "파일명에 학번·이름을 넣어두면 결과 구분이 쉽습니다.",
     )
 
+    style_files = st.file_uploader(
+        "예시 세특 업로드 (선택, 문체 참고용 — 잘 쓴 세특 1~2개)",
+        type=["txt", "docx", "hwp", "hwpx"],
+        accept_multiple_files=True,
+        key="style_files",
+        help="업로드한 예시는 문체·어미·구성 방식만 참고하며 내용·사실·활동은 사용되지 않습니다. "
+        "개인정보가 없는 자료를 쓰거나 이름·학교 등을 마스킹하는 것을 권장합니다.",
+    )
+
+    # 문체 참고 예시 읽기 (앞 2개, 각 1500자 이내)
+    style_examples: list[str] = []
+    for f in (style_files or [])[:2]:
+        try:
+            txt = read_uploaded_file(f)
+        except Exception as e:
+            st.warning(f"⚠️ 예시 세특 '{f.name}'에서 텍스트를 추출하지 못해 건너뜁니다: {e}")
+            continue
+        if txt.strip():
+            style_examples.append(txt.strip()[:1500])
+    if style_examples:
+        st.caption(f"🖋️ 문체 참고 예시 {len(style_examples)}개 적용 — 내용은 사용되지 않습니다.")
+
     # 단일 파일 미리보기
     single_eval_text = ""
     if len(eval_files) == 1:
@@ -1148,6 +1170,12 @@ else:
         help="사이드바에서 선택한 NEIS 항목의 제한이 기본값으로 반영됩니다.",
     )
 
+    dual_draft = st.toggle(
+        "⚖️ 2버전 생성 후 비교 선택 (API 호출 2배)",
+        key="dual_draft",
+        value=False,
+    )
+
     gen = st.button("✍️ 초안 생성", type="primary", use_container_width=True)
 
     if gen:
@@ -1162,6 +1190,7 @@ else:
 
         st.session_state.pop("draft_text", None)
         st.session_state.pop("batch_drafts", None)
+        st.session_state.pop("draft_variants", None)
         st.session_state.pop("quality_draft", None)
         st.session_state.pop("proofread_draft", None)
 
@@ -1178,6 +1207,7 @@ else:
                     inputs.append((stem, "", str(e)))
 
             masked_performance = apply_mask(performance_text, mask_map)
+            masked_style_examples = [apply_mask(x, mask_map) for x in style_examples]
 
             def _draft_job(idx: int) -> dict:
                 stem, eval_text, err = inputs[idx]
@@ -1191,6 +1221,7 @@ else:
                         apply_mask(eval_text, mask_map),
                         target_len,
                         api_key,
+                        style_examples=masked_style_examples,
                     )
                     return {"name": stem, "draft": remove_mask(draft, mask_map), "error": ""}
                 except Exception as e:
@@ -1202,28 +1233,77 @@ else:
             record_history(f"일괄 초안 {len(inputs)}건", "")
         else:
             # ── 단일 생성 ──
-            with st.spinner(f"세특 초안 생성 중… ({GEMINI_MODEL})"):
+            masked_performance = apply_mask(performance_text, mask_map)
+            masked_self_eval = apply_mask(single_eval_text, mask_map)
+            masked_style_examples = [apply_mask(x, mask_map) for x in style_examples]
+            # 재생성 시 원자료 맥락 전달용 (마스킹된 상태로 보관)
+            draft_context = {
+                "subject": subject.strip(),
+                "performance": masked_performance,
+                "self_eval": masked_self_eval,
+                "style_examples": masked_style_examples,
+            }
+
+            def _single_draft_job(_idx: int = 0) -> tuple[str, str]:
                 try:
-                    draft = generate_draft_with_gemini(
-                        subject,
-                        major,
-                        apply_mask(performance_text, mask_map),
-                        apply_mask(single_eval_text, mask_map),
-                        target_len,
-                        api_key,
+                    return (
+                        generate_draft_with_gemini(
+                            subject,
+                            major,
+                            masked_performance,
+                            masked_self_eval,
+                            target_len,
+                            api_key,
+                            style_examples=masked_style_examples,
+                        ),
+                        "",
                     )
-                    st.session_state["draft_text"] = remove_mask(draft, mask_map)
-                    record_history(
-                        f"초안: {subject or '무제'}", st.session_state["draft_text"]
-                    )
-                    # 재생성 시 원자료 맥락 전달용 (마스킹된 상태로 보관)
-                    st.session_state["draft_context"] = {
-                        "subject": subject.strip(),
-                        "performance": apply_mask(performance_text, mask_map),
-                        "self_eval": apply_mask(single_eval_text, mask_map),
-                    }
                 except Exception as e:
-                    st.error(f"❌ Gemini API 호출 실패: {e}")
+                    return ("", str(e))
+
+            if dual_draft:
+                # ── 2버전 동시 생성 ──
+                outs = run_parallel(2, _single_draft_job, "2버전 생성 중…")
+                variants = [remove_mask(d, mask_map) for d, _ in outs]
+                errors = [err for _, err in outs if err]
+                if any(not v.strip() for v in variants):
+                    st.error(
+                        "❌ 2버전 생성 실패: " + "; ".join(errors)
+                        if errors
+                        else "❌ 2버전 생성에 실패했습니다."
+                    )
+                else:
+                    st.session_state["draft_variants"] = variants
+                    st.session_state["draft_context"] = draft_context
+            else:
+                with st.spinner(f"세특 초안 생성 중… ({GEMINI_MODEL})"):
+                    draft, err = _single_draft_job()
+                    if err:
+                        st.error(f"❌ Gemini API 호출 실패: {err}")
+                    else:
+                        st.session_state["draft_text"] = remove_mask(draft, mask_map)
+                        record_history(
+                            f"초안: {subject or '무제'}", st.session_state["draft_text"]
+                        )
+                        st.session_state["draft_context"] = draft_context
+
+    # ── 2버전 비교 선택 ──
+    variants = st.session_state.get("draft_variants")
+    if variants:
+        st.divider()
+        st.subheader("2️⃣ 버전 비교")
+        col_a, col_b = st.columns(2)
+        for col, label, v, sel_key in (
+            (col_a, "버전 A", variants[0], "select_a"),
+            (col_b, "버전 B", variants[1], "select_b"),
+        ):
+            col.text_area(label, value=v, height=280, key=f"variant_{sel_key}")
+            col.caption(f"{len(v):,}자")
+            if col.button("✅ 이 버전 선택", key=sel_key, use_container_width=True):
+                st.session_state["draft_text"] = v
+                record_history("초안(버전 선택)", v)
+                st.session_state.pop("draft_variants", None)
+                st.rerun()
 
     # ── 단일 초안 결과 ──
     draft = st.session_state.get("draft_text", "")
