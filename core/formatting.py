@@ -7,6 +7,8 @@ import re
 
 import pandas as pd
 
+from core.rules import neis_bytes
+
 # ──────────────────────────────────────────────
 # 하이라이트 렌더링 / 분량 표시
 # ──────────────────────────────────────────────
@@ -192,6 +194,7 @@ def build_batch_workbook(batch: list[dict], neis_limit: int = 0) -> bytes:
         row = {
             "학생": b.get("name", ""),
             "글자 수": len(text),
+            "NEIS 바이트": neis_bytes(text),
             "위반": n_violation,
             "주의": n_caution,
         }
@@ -273,4 +276,44 @@ def build_batch_workbook(batch: list[dict], neis_limit: int = 0) -> bytes:
             pd.DataFrame(quality_rows).to_excel(
                 writer, sheet_name="품질 진단", index=False
             )
+    return buf.getvalue()
+
+
+# ──────────────────────────────────────────────
+# 나이스 입력용 엑셀(.xlsx) 생성
+# ──────────────────────────────────────────────
+def build_neis_workbook(batch: list[dict], neis_limit: int = 0) -> bytes:
+    """나이스에 그대로 붙여넣을 수 있도록 이름·내용만 담은 단일 시트 엑셀을 만든다.
+
+    시트 "나이스 입력" 열: 이름 / 내용(수정본 우선, 없으면 원문) / 글자 수 /
+    NEIS 바이트 / 제한 초과. neis_limit>0이면 바이트 제한(neis_limit*3) 기준으로
+    "초과"/"이내"를 표기하고, 제한이 없으면 "-"로 둔다. error 항목은 제외한다.
+    """
+    batch = batch or []
+    byte_limit = neis_limit * 3
+    cols = ["이름", "내용", "글자 수", "NEIS 바이트", "제한 초과"]
+    rows = []
+    for b in batch:
+        if b.get("error"):
+            continue
+        content = b.get("revised") or b.get("text", "")
+        nbytes = neis_bytes(content)
+        if neis_limit > 0:
+            over = "초과" if nbytes > byte_limit else "이내"
+        else:
+            over = "-"
+        rows.append(
+            {
+                "이름": b.get("name", ""),
+                "내용": content,
+                "글자 수": len(content),
+                "NEIS 바이트": nbytes,
+                "제한 초과": over,
+            }
+        )
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=cols)
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="나이스 입력", index=False)
     return buf.getvalue()

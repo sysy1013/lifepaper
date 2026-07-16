@@ -28,6 +28,7 @@ import streamlit as st
 
 from core.formatting import (
     build_batch_workbook,
+    build_neis_workbook,
     build_student_report,
     findings_to_df,
     highlight_text,
@@ -56,10 +57,17 @@ from core.parsing import (
     read_uploaded_file,
     unique_names,
 )
+from core.project import (
+    PROJECT_KEYS,
+    deserialize_project,
+    replace_in_entries,
+    serialize_project,
+)
 from core.rules import (
     NEIS_LIMITS,
     filter_ignored,
     find_similar_pairs,
+    neis_bytes,
     parse_custom_words,
     rule_based_filter,
     style_check,
@@ -89,6 +97,57 @@ def record_history(label: str, content: str) -> None:
         }
     )
     del hist[:-20]
+
+
+def export_project() -> str:
+    """현재 세션의 작업 상태를 프로젝트 JSON 문자열로 직렬화한다."""
+    data = {k: st.session_state.get(k) for k in PROJECT_KEYS if k in st.session_state}
+    return serialize_project(data)
+
+
+def import_project(raw: bytes) -> str:
+    """프로젝트 JSON을 검증해 세션에 복원한다. 성공 시 '' 또는 오류 메시지 반환.
+
+    on_click 콜백에서 호출되므로(콜백은 스크립트 재실행 전에 실행된다) 위젯 key인
+    'mask_words_raw'도 위젯 생성 전에 안전하게 되돌릴 수 있다.
+    """
+    data, err = deserialize_project(raw)
+    if err:
+        return err
+    for k, v in data.items():
+        st.session_state[k] = v
+    return ""
+
+
+def _restore_project() -> None:
+    """복원 실행 버튼 콜백 — 업로드된 파일을 읽어 세션에 복원한다."""
+    up = st.session_state.get("proj_file")
+    if up is None:
+        st.session_state["proj_msg"] = "❌ 불러올 프로젝트 파일을 먼저 선택해 주세요."
+        return
+    err = import_project(up.getvalue())
+    st.session_state["proj_msg"] = err if err else "✅ 프로젝트를 복원했습니다."
+
+
+def render_replace_control(state_key: str, field: str, widget_key: str) -> None:
+    """일괄 텍스트 치환 UI. state_key의 항목 목록 중 field 문자열을 치환한다."""
+    entries = st.session_state.get(state_key)
+    if not entries:
+        return
+    with st.expander("🔁 텍스트 일괄 치환"):
+        find = st.text_input("찾을 문구", key=f"find_{widget_key}")
+        repl = st.text_input("바꿀 문구", key=f"repl_{widget_key}")
+        if find:
+            _, n_match = replace_in_entries(entries, field, find, repl)
+            st.caption(f"총 매치 **{n_match}건** (치환 적용 시 교체됩니다)")
+        if st.button("치환 적용", key=f"apply_{widget_key}", use_container_width=True):
+            if not find:
+                st.warning("⚠️ 찾을 문구를 먼저 입력해 주세요.")
+            else:
+                new_entries, n = replace_in_entries(entries, field, find, repl)
+                st.session_state[state_key] = new_entries
+                record_history(f"일괄 치환: '{find}'→'{repl}' {n}건", "")
+                st.rerun()
 
 
 def run_parallel(n: int, job, label: str) -> list:
@@ -299,12 +358,12 @@ def render_length_adjuster(
     if not text:
         return
     cur_chars = len(text)
-    cur_bytes = len(text.encode("utf-8"))
+    cur_bytes = neis_bytes(text)
 
     st.markdown("**📏 분량 조절 (줄이기/늘리기)**")
     unit = st.radio(
         "조절 기준",
-        ["글자 수 (공백 포함)", "바이트 (UTF-8 · 한글 3byte)"],
+        ["글자 수 (공백 포함)", "바이트 (NEIS · 한글 3B)"],
         horizontal=True,
         key=f"unit_{widget_key}",
     )
@@ -380,24 +439,33 @@ def render_highlight_box(
 
 
 def render_length_metrics(text: str, limit: int) -> None:
-    """글자 수·바이트 수 지표와 NEIS 제한 초과 여부를 표시한다."""
+    """글자 수·NEIS 바이트 지표와 제한 초과 여부를 표시한다.
+
+    초과 판정은 사이드바에서 선택한 분량 기준(len_unit)을 따른다.
+    바이트 기준일 때 유효 제한은 글자 수 제한 × 3이다.
+    """
     char_with_space = len(text)
     char_no_space = len(re.sub(r"\s", "", text))
-    nbytes = len(text.encode("utf-8"))
+    nbytes = neis_bytes(text)
 
     c1, c2, c3 = st.columns(3)
     c1.metric("글자 수 (공백 포함)", f"{char_with_space:,}자")
     c2.metric("글자 수 (공백 제외)", f"{char_no_space:,}자")
-    c3.metric("바이트 (NEIS 기준·한글 3byte)", f"{nbytes:,} byte")
+    c3.metric("NEIS 바이트 (한글 3B)", f"{nbytes:,} byte")
 
     if limit > 0:
-        if char_with_space > limit:
+        by_bytes = str(st.session_state.get("len_unit", "")).startswith("NEIS 바이트")
+        if by_bytes:
+            value, eff_limit, unit = nbytes, limit * 3, "byte"
+        else:
+            value, eff_limit, unit = char_with_space, limit, "자"
+        if value > eff_limit:
             st.error(
-                f"🚨 NEIS 제한 초과: {char_with_space:,}자 / {limit:,}자 "
-                f"(**{char_with_space - limit:,}자 초과**)"
+                f"🚨 NEIS 제한 초과: {value:,}{unit} / {eff_limit:,}{unit} "
+                f"(**{value - eff_limit:,}{unit} 초과**)"
             )
         else:
-            st.success(f"✅ NEIS 제한 이내: {char_with_space:,}자 / {limit:,}자")
+            st.success(f"✅ NEIS 제한 이내: {value:,}{unit} / {eff_limit:,}{unit}")
 
 
 def show_review_output(text: str, findings: list[dict], csv_name: str = "생기부_심사결과.csv") -> None:
@@ -567,6 +635,14 @@ with st.sidebar:
     )
     neis_limit = NEIS_LIMITS[neis_item]
 
+    use_bytes = st.radio(
+        "분량 기준",
+        ["글자 수 (공백 포함)", "NEIS 바이트 (한글 3B)"],
+        horizontal=True,
+        key="len_unit",
+        help="NEIS 바이트 기준은 글자 수 제한을 자→바이트(×3)로 환산해 초과 여부를 판정합니다.",
+    ).startswith("NEIS 바이트")
+
     custom_words_raw = st.text_area(
         "사용자 정의 금칙어 (선택)",
         height=90,
@@ -620,6 +696,36 @@ with st.sidebar:
         if st.button("무시 목록 비우기", key="clear_ignored"):
             st.session_state["ignored_words"] = []
             st.rerun()
+
+    # 프로젝트 저장/복원 — 세션 작업 상태를 JSON 파일로 내보내고 되돌린다.
+    st.divider()
+    st.markdown("**💾 프로젝트**")
+    st.caption(
+        "⚠️ 저장 파일에는 **학생 정보가 포함**됩니다. 외부에 올리지 말고 "
+        "교사 PC에만 보관하세요."
+    )
+    st.download_button(
+        "📥 프로젝트 저장 (JSON)",
+        data=export_project(),
+        file_name="생기부_프로젝트.json",
+        mime="application/json",
+        key="proj_dl",
+        use_container_width=True,
+    )
+    st.file_uploader("프로젝트 불러오기", type=["json"], key="proj_file")
+    st.button(
+        "📂 복원 실행",
+        key="proj_restore",
+        use_container_width=True,
+        on_click=_restore_project,
+    )
+    proj_msg = st.session_state.get("proj_msg")
+    if proj_msg:
+        if proj_msg.startswith("✅"):
+            st.success(proj_msg)
+        else:
+            st.error(proj_msg)
+        st.session_state.pop("proj_msg", None)
 
 # ── 모드 선택 ──
 mode = st.radio(
@@ -883,7 +989,10 @@ if mode == "🔍 기재 금지 표현 검토":
         render_ignore_control(all_findings, "ign_batch")
         ignored_now = set(st.session_state["ignored_words"])
 
-        # 반 전체 요약표
+        # 반 전체 요약표 (사이드바에서 선택한 분량 기준으로 계산)
+        count_label = "NEIS 바이트" if use_bytes else "글자 수"
+        eff_limit = neis_limit * 3 if use_bytes else neis_limit
+        unit = "byte" if use_bytes else "자"
         summary_rows = []
         for b in ok:
             b_findings = filter_ignored(b["findings"], ignored_now)
@@ -892,16 +1001,16 @@ if mode == "🔍 기재 금지 표현 검토":
             )
             n_caution = len(b_findings) - n_violation
             top_words = ", ".join(f["word"] for f in b_findings[:3])
-            chars = len(b["text"])
+            count = neis_bytes(b["text"]) if use_bytes else len(b["text"])
             row = {
                 "학생(파일명)": b["name"],
-                "글자 수": chars,
+                count_label: count,
                 "분량": (
-                    f"{chars - neis_limit}자 초과"
-                    if neis_limit and chars > neis_limit
+                    f"{count - eff_limit}{unit} 초과"
+                    if eff_limit and count > eff_limit
                     else "이내"
                 )
-                if neis_limit
+                if eff_limit
                 else "-",
                 "위반": n_violation,
                 "주의": n_caution,
@@ -915,8 +1024,26 @@ if mode == "🔍 기재 금지 표현 검토":
             summary_rows.append(row)
         if summary_rows:
             summary_df = pd.DataFrame(summary_rows)
-            st.dataframe(summary_df, use_container_width=True, hide_index=True)
-            dl_csv, dl_xlsx = st.columns(2)
+
+            def _highlight_over(col: pd.Series) -> list[str]:
+                return [
+                    "background-color: #ffcccc"
+                    if isinstance(v, str) and "초과" in v
+                    else ""
+                    for v in col
+                ]
+
+            st.dataframe(
+                summary_df.style.apply(_highlight_over, subset=["분량"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            # 오탐 무시 목록을 반영한 사본으로 엑셀 생성 (요약표와 일관성 유지)
+            ok_filtered = [
+                {**b, "findings": filter_ignored(b["findings"], ignored_now)}
+                for b in ok
+            ]
+            dl_csv, dl_xlsx, dl_neis = st.columns(3)
             dl_csv.download_button(
                 "📥 반 전체 검토 요약 CSV 다운로드",
                 data=summary_df.to_csv(index=False).encode("utf-8-sig"),
@@ -924,15 +1051,17 @@ if mode == "🔍 기재 금지 표현 검토":
                 mime="text/csv",
                 use_container_width=True,
             )
-            # 오탐 무시 목록을 반영한 사본으로 엑셀 생성 (요약표와 일관성 유지)
-            ok_filtered = [
-                {**b, "findings": filter_ignored(b["findings"], ignored_now)}
-                for b in ok
-            ]
             dl_xlsx.download_button(
                 "📊 종합 결과 엑셀 다운로드",
                 data=build_batch_workbook(ok_filtered, neis_limit),
                 file_name="생기부_일괄검토_종합.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+            dl_neis.download_button(
+                "🗂️ 나이스 입력용 엑셀",
+                data=build_neis_workbook(ok_filtered, neis_limit),
+                file_name="생기부_나이스입력.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
@@ -1032,6 +1161,10 @@ if mode == "🔍 기재 금지 표현 검토":
                 file_name="생기부_수정본_일괄.zip",
                 mime="application/zip",
             )
+
+        # 수정본 일괄 치환 (수정본이 있는 학생에게만 적용됩니다)
+        st.caption("아래 치환은 **수정본이 있는 학생에게만** 적용됩니다.")
+        render_replace_control("batch_review", "revised", "batch_review_replace")
 
         # 개인별 종합 리포트 ZIP (검출/수정본/품질/오탈자 등 실행된 결과 모두 포함)
         if ok:
@@ -1474,6 +1607,9 @@ else:
         ]
         if draft_post_errors:
             st.error("❌ 일부 후처리 실패 — " + " / ".join(draft_post_errors))
+
+        # 초안 일괄 치환
+        render_replace_control("batch_drafts", "draft", "batch_drafts_replace")
 
         # 초안 간 유사도 검사 (같은 수행평가 기반이라 문장이 겹치기 쉬움)
         st.subheader("👥 초안 간 유사도 검사")

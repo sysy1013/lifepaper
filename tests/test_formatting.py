@@ -6,6 +6,7 @@ import pandas as pd
 from core.formatting import (
     HIGHLIGHT_STYLE_CAUTION,
     build_batch_workbook,
+    build_neis_workbook,
     build_student_report,
     findings_to_df,
     highlight_text,
@@ -233,3 +234,68 @@ def test_build_batch_workbook_empty_batch_summary_only():
     data = build_batch_workbook([])
     xls = pd.ExcelFile(io.BytesIO(data))
     assert xls.sheet_names == ["요약"]
+
+
+def test_build_batch_workbook_summary_includes_byte_column():
+    data = build_batch_workbook(_batch_two_students(), neis_limit=500)
+    summary = pd.read_excel(io.BytesIO(data), sheet_name="요약")
+    assert "글자 수" in summary.columns
+    assert "NEIS 바이트" in summary.columns
+
+
+# ── build_neis_workbook ──
+def test_build_neis_workbook_prefers_revised_over_text():
+    batch = [
+        {"name": "학생A", "text": "원문 내용", "revised": "수정된 내용"},
+    ]
+    data = build_neis_workbook(batch)
+    df = pd.read_excel(io.BytesIO(data), sheet_name="나이스 입력")
+    assert df.iloc[0]["내용"] == "수정된 내용"
+
+
+def test_build_neis_workbook_uses_text_when_revised_empty():
+    batch = [
+        {"name": "학생A", "text": "원문 내용", "revised": ""},
+        {"name": "학생B", "text": "다른 내용"},
+    ]
+    data = build_neis_workbook(batch)
+    df = pd.read_excel(io.BytesIO(data), sheet_name="나이스 입력")
+    assert df.iloc[0]["내용"] == "원문 내용"
+    assert df.iloc[1]["내용"] == "다른 내용"
+
+
+def test_build_neis_workbook_skips_error_entries():
+    batch = [
+        {"name": "학생A", "text": "정상 내용"},
+        {"name": "학생B", "text": "", "error": "읽기 실패"},
+    ]
+    data = build_neis_workbook(batch)
+    df = pd.read_excel(io.BytesIO(data), sheet_name="나이스 입력")
+    assert len(df) == 1
+    assert df.iloc[0]["이름"] == "학생A"
+
+
+def test_build_neis_workbook_byte_limit_flag_correct():
+    # 한글 10자 = 30바이트. 제한 5자 → 바이트 제한 15 → 초과.
+    batch = [
+        {"name": "초과", "text": "가나다라마바사아자차"},
+        {"name": "이내", "text": "가나"},
+    ]
+    data = build_neis_workbook(batch, neis_limit=5)
+    df = pd.read_excel(io.BytesIO(data), sheet_name="나이스 입력")
+    flags = dict(zip(df["이름"], df["제한 초과"]))
+    assert flags["초과"] == "초과"
+    assert flags["이내"] == "이내"
+
+
+def test_build_neis_workbook_no_limit_shows_dash():
+    batch = [{"name": "학생A", "text": "내용"}]
+    data = build_neis_workbook(batch, neis_limit=0)
+    df = pd.read_excel(io.BytesIO(data), sheet_name="나이스 입력")
+    assert df.iloc[0]["제한 초과"] == "-"
+
+
+def test_build_neis_workbook_empty_batch_has_sheet():
+    data = build_neis_workbook([])
+    xls = pd.ExcelFile(io.BytesIO(data))
+    assert xls.sheet_names == ["나이스 입력"]

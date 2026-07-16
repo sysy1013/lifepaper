@@ -2,10 +2,29 @@
 from core.rules import (
     filter_ignored,
     find_similar_pairs,
+    neis_bytes,
     parse_custom_words,
     rule_based_filter,
     style_check,
 )
+
+
+# ── neis_bytes ──
+def test_neis_bytes_pure_ascii_counts_one_each():
+    assert neis_bytes("abc 123") == 7
+
+
+def test_neis_bytes_hangul_counts_three_each():
+    assert neis_bytes("가나다") == 9
+
+
+def test_neis_bytes_mixed_string_exact_count():
+    # "홍길동A1" → 한글 3자×3 + ASCII 2자×1 = 11
+    assert neis_bytes("홍길동A1") == 11
+
+
+def test_neis_bytes_empty_is_zero():
+    assert neis_bytes("") == 0
 
 
 # ── rule_based_filter ──
