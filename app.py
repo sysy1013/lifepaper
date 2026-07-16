@@ -770,18 +770,35 @@ def generate_draft_with_gemini(
 
 
 def refine_draft_with_gemini(
-    draft: str, feedback: str, target_len: int, api_key: str
+    draft: str,
+    feedback: str,
+    target_len: int,
+    api_key: str,
+    context: dict | None = None,
 ) -> str:
-    """기존 초안에 교사 피드백을 반영하여 재작성한다."""
+    """기존 초안에 교사 피드백을 반영하여 재작성한다.
+
+    context가 있으면 최초 생성에 쓰인 원자료(과목·수행평가·자기평가서)를 함께 전달해
+    재생성을 반복해도 원자료에 없는 사실이 끼어들지 않도록 한다.
+    """
     model = _make_model(api_key, DRAFT_SYSTEM_PROMPT, temperature=0.7)
-    prompt = (
-        f"[기존 세특 초안]\n{draft}\n\n"
-        f"[교사 피드백]\n{feedback.strip()}\n\n"
-        f"[목표 분량]\n공백 포함 약 {target_len}자\n\n"
+    parts = []
+    if context:
+        if context.get("subject"):
+            parts.append(f"[과목명]\n{context['subject']}")
+        if context.get("performance"):
+            parts.append(f"[수행평가 활동 내용 (원자료)]\n{context['performance']}")
+        if context.get("self_eval"):
+            parts.append(f"[학생 자기평가서 원문 (원자료)]\n{context['self_eval']}")
+    parts.append(f"[기존 세특 초안]\n{draft}")
+    parts.append(f"[교사 피드백]\n{feedback.strip()}")
+    parts.append(f"[목표 분량]\n공백 포함 약 {target_len}자")
+    parts.append(
         "기존 초안을 교사 피드백에 맞게 수정하여 세특 초안 본문만 출력하라. "
-        "피드백과 무관한 부분은 최대한 유지한다."
+        "피드백과 무관한 부분은 최대한 유지하고, "
+        "원자료에 없는 새로운 사실을 추가하지 않는다."
     )
-    return _gemini_text(model, prompt)
+    return _gemini_text(model, "\n\n".join(parts))
 
 
 # ──────────────────────────────────────────────
@@ -1719,6 +1736,12 @@ else:
                         api_key,
                     )
                     st.session_state["draft_text"] = remove_mask(draft, mask_map)
+                    # 재생성 시 원자료 맥락 전달용 (마스킹된 상태로 보관)
+                    st.session_state["draft_context"] = {
+                        "subject": subject.strip(),
+                        "performance": apply_mask(performance_text, mask_map),
+                        "self_eval": apply_mask(single_eval_text, mask_map),
+                    }
                 except Exception as e:
                     st.error(f"❌ Gemini API 호출 실패: {e}")
 
@@ -1776,6 +1799,7 @@ else:
                             apply_mask(feedback, mask_map),
                             target_len,
                             api_key,
+                            context=st.session_state.get("draft_context"),
                         )
                         st.session_state["draft_text"] = remove_mask(refined, mask_map)
                         st.session_state.pop("quality_draft", None)
