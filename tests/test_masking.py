@@ -66,5 +66,13 @@ def test_suggest_respects_max_5():
 
 
 def test_suggest_single_occurrence_name_not_suggested():
-    # 한 번만 등장하는 이름은 제안하지 않는다 (오탐 감소).
-    assert "김철수" not in suggest_mask_candidates(["김철수 학생의 활동 기록"])
+    # 한 번만 등장하고 "학생"도 뒤따르지 않는 이름은 제안하지 않는다 (오탐 감소).
+    assert "김철수" not in suggest_mask_candidates(["김철수 발표함."])
+
+
+def test_suggest_single_occurrence_name_followed_by_student_is_suggested():
+    # 1회만 등장해도 "학생"이 바로 뒤에 이어지면(공백 포함) 제안한다.
+    texts = ["김철수 학생은 성실함.", "이영희 학생이 발표를 진행함."]
+    result = suggest_mask_candidates(texts)
+    assert "김철수" in result
+    assert "이영희" in result

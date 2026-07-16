@@ -9,6 +9,7 @@ from core.gemini import (
     _strip_code_fence,
     build_draft_prompt,
     quality_avg,
+    rewrite_with_gemini,
 )
 
 
@@ -138,6 +139,27 @@ def test_build_draft_prompt_without_style_examples():
     )
     assert "[문체 참고 예시 1]" not in p2
     assert _NO_COPY not in p2
+
+
+# ── rewrite_with_gemini ──
+def test_rewrite_retries_when_first_pass_still_dirty(monkeypatch):
+    model = _StubModel(["TOEIC 900점을 받은 학생입니다.", "영어 실력이 뛰어난 학생입니다."])
+    monkeypatch.setattr("core.gemini._make_model", lambda *a, **k: model)
+
+    result = rewrite_with_gemini("원문", [], "영어영문학과", "fake-key")
+
+    assert model.calls == 2
+    assert result == "영어 실력이 뛰어난 학생입니다."
+
+
+def test_rewrite_single_pass_when_already_clean(monkeypatch):
+    model = _StubModel(["성실하게 탐구 활동에 참여함."])
+    monkeypatch.setattr("core.gemini._make_model", lambda *a, **k: model)
+
+    result = rewrite_with_gemini("원문", [], "영어영문학과", "fake-key")
+
+    assert model.calls == 1
+    assert result == "성실하게 탐구 활동에 참여함."
 
 
 # ── _strip_code_fence ──

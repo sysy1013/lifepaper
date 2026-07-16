@@ -202,7 +202,11 @@ REWRITE_SYSTEM_PROMPT = """너는 교육부 '학교생활기록부 기재요령'
 def rewrite_with_gemini(
     text: str, findings: list[dict], major: str, api_key: str
 ) -> str:
-    """검토 결과(위반 목록)를 반영한 수정본 전문을 생성한다."""
+    """검토 결과(위반 목록)를 반영한 수정본 전문을 생성한다.
+
+    1차 수정본에 규칙 기반 검사(rule_based_filter)로 걸리는 금지 표현이 남아있으면,
+    해당 표현을 알려주고 한 번 더 수정을 요청한다(2차 시도).
+    """
     model = _make_model(api_key, REWRITE_SYSTEM_PROMPT, temperature=0.3)
     findings_lines = "\n".join(
         f"- 「{f['word']}」 (사유: {f['reason']}) → 추천: {f['suggestion_1']} / {f['suggestion_2']}"
@@ -214,7 +218,20 @@ def rewrite_with_gemini(
         f"[검토에서 발견된 위반 표현과 대체 추천]\n{findings_lines}\n\n"
         "위 위반 표현을 모두 반영하여 수정된 전체 본문만 출력하라."
     )
-    return _gemini_text(model, prompt)
+    result = _gemini_text(model, prompt)
+
+    remaining = rule_based_filter(result, [])
+    if remaining:
+        words = ", ".join(f"「{f['word']}」" for f in remaining)
+        retry_prompt = (
+            f"{prompt}\n\n"
+            f"[1차 수정본]\n{result}\n\n"
+            f"[여전히 남아있는 금지 표현]\n{words}\n\n"
+            "위 표현을 반드시 제거하거나 대체하여 수정된 전체 본문만 출력하라."
+        )
+        result = _gemini_text(model, retry_prompt)
+
+    return result
 
 
 # ──────────────────────────────────────────────
