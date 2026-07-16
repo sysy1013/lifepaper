@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 from core.rules import (
+    filter_ignored,
     find_similar_pairs,
     parse_custom_words,
     rule_based_filter,
@@ -71,3 +72,17 @@ def test_find_similar_pairs_flags_near_identical():
     assert len(pairs) == 1
     assert {pairs[0][0], pairs[0][1]} == {"학생A", "학생B"}
     assert pairs[0][2] >= 0.55
+
+
+# ── filter_ignored ──
+def test_filter_ignored_removes_matching_words():
+    findings = [{"word": "TOEIC"}, {"word": "김철수"}, {"word": "서울대"}]
+    result = filter_ignored(findings, {"김철수"})
+    words = [f["word"] for f in result]
+    assert "김철수" not in words
+    assert words == ["TOEIC", "서울대"]
+
+
+def test_filter_ignored_empty_is_noop():
+    findings = [{"word": "TOEIC"}, {"word": "서울대"}]
+    assert filter_ignored(findings, []) == findings

@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-from core.masking import apply_mask, build_mask_map, remove_mask
+from core.masking import (
+    apply_mask,
+    build_mask_map,
+    remove_mask,
+    suggest_mask_candidates,
+)
 
 
 def test_build_mask_map_orders_longer_words_first():
@@ -31,3 +36,35 @@ def test_empty_map_is_noop():
     text = "아무 내용"
     assert apply_mask(text, []) == text
     assert remove_mask(text, []) == text
+
+
+# ── suggest_mask_candidates ──
+def test_suggest_detects_repeated_name():
+    texts = ["김철수 학생은 성실함.", "발표에서 김철수 학생이 탐구 과정을 설명함."]
+    assert "김철수" in suggest_mask_candidates(texts)
+
+
+def test_suggest_detects_student_number():
+    assert "20301" in suggest_mask_candidates(["학번 20301 학생의 활동 기록"])
+
+
+def test_suggest_excludes_stopword():
+    # '이해'는 성씨로 시작하지만 흔한 단어 → 불용어로 제외
+    texts = ["내용을 이해함.", "깊이 이해하는 모습을 이해함."]
+    assert "이해" not in suggest_mask_candidates(texts)
+
+
+def test_suggest_excludes_existing_entries():
+    texts = ["김철수 학생.", "김철수 발표함."]
+    assert "김철수" not in suggest_mask_candidates(texts, existing=["김철수"])
+
+
+def test_suggest_respects_max_5():
+    names = ["김철수", "이영희", "박민수", "최지훈", "정하늘", "강도현", "조은별"]
+    texts = [" ".join(names), " ".join(names)]  # 각 이름 2회 등장
+    assert len(suggest_mask_candidates(texts)) <= 5
+
+
+def test_suggest_single_occurrence_name_not_suggested():
+    # 한 번만 등장하는 이름은 제안하지 않는다 (오탐 감소).
+    assert "김철수" not in suggest_mask_candidates(["김철수 학생의 활동 기록"])

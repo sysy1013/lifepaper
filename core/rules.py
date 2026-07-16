@@ -96,6 +96,12 @@ def parse_custom_words(raw: str) -> list[str]:
     return [w.strip() for w in re.split(r"[,\n]", raw) if w.strip()]
 
 
+def filter_ignored(findings: list[dict], ignored) -> list[dict]:
+    """ignored(단어 집합)에 포함된 검출어를 제외한다."""
+    ignore_set = set(ignored)
+    return [f for f in findings if f.get("word") not in ignore_set]
+
+
 # ──────────────────────────────────────────────
 # 문체·상투 표현 점검 (규칙 기반, API 불필요)
 # ──────────────────────────────────────────────
