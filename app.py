@@ -140,6 +140,23 @@ def _gemini_json(model, prompt: str, parse_attempts: int = 2):
                 raise
 
 
+def run_parallel(n: int, job, label: str) -> list:
+    """job(idx)를 BATCH_WORKERS 동시 실행. 진행바 표시, 입력 순서대로 결과 반환."""
+    results: list = [None] * n
+    if n == 0:
+        return results
+    progress = st.progress(0.0, text=label)
+    with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
+        futures = {pool.submit(job, i): i for i in range(n)}
+        done = 0
+        for fut in as_completed(futures):
+            results[futures[fut]] = fut.result()
+            done += 1
+            progress.progress(done / n, text=f"{label} ({done}/{n})")
+    progress.empty()
+    return results
+
+
 # ──────────────────────────────────────────────
 # 파일 텍스트 추출 (.txt / .hwp / .hwpx)
 # ──────────────────────────────────────────────
@@ -647,6 +664,31 @@ def render_quality_result(q: dict) -> None:
         st.markdown("**✅ 개선 제안**")
         for i, imp in enumerate(improvements, 1):
             st.markdown(f"{i}. {imp}")
+
+
+def render_quality_compact(q: dict) -> None:
+    """expander 내부용 품질 진단 결과 (중첩 expander 없이 한 덩어리로)."""
+    scores = q.get("scores", [])
+    if scores:
+        avg = sum(float(s.get("score", 0)) for s in scores) / len(scores)
+        st.markdown(f"**🏅 품질 진단 — 종합 {avg:.1f} / 5.0**")
+        st.markdown(
+            " · ".join(
+                f"{s.get('criterion', '')} **{s.get('score', '-')}/5**" for s in scores
+            )
+        )
+    if q.get("overall"):
+        st.markdown(f"🧑‍🏫 {q['overall']}")
+    improvements = q.get("improvements", [])
+    if improvements:
+        st.markdown("개선 제안: " + " / ".join(str(i) for i in improvements))
+
+
+def quality_avg(q: dict) -> float | None:
+    scores = q.get("scores", [])
+    if not scores:
+        return None
+    return sum(float(s.get("score", 0)) for s in scores) / len(scores)
 
 
 def render_quality_block(text: str, major: str, api_key: str, state_key: str) -> None:
@@ -1230,7 +1272,6 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state.pop("quality_review", None)
             st.session_state.pop("proofread_review", None)
 
-            progress = st.progress(0.0, text="일괄 검토 중…")
             stems = unique_names([file_stem(f.name) for f in review_files])
 
             # 파일 읽기는 메인 스레드에서 (UploadedFile은 스레드 안전하지 않음)
@@ -1253,19 +1294,9 @@ if mode == "🔍 기재 금지 표현 검토":
                 except Exception as e:
                     return {"name": stem, "text": "", "findings": [], "error": str(e)}
 
-            batch_reviews: list[dict] = [{}] * len(inputs)
-            with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
-                futures = {pool.submit(_review_job, i): i for i in range(len(inputs))}
-                done = 0
-                for fut in as_completed(futures):
-                    batch_reviews[futures[fut]] = fut.result()
-                    done += 1
-                    progress.progress(
-                        done / len(inputs),
-                        text=f"일괄 검토 중… ({done}/{len(inputs)})",
-                    )
-            progress.empty()
-            st.session_state["batch_review"] = batch_reviews
+            st.session_state["batch_review"] = run_parallel(
+                len(inputs), _review_job, "일괄 검토 중…"
+            )
         else:
             # ── 단일 검토 ──
             if not input_text.strip():
@@ -1379,22 +1410,26 @@ if mode == "🔍 기재 금지 표현 검토":
             n_caution = len(b["findings"]) - n_violation
             top_words = ", ".join(f["word"] for f in b["findings"][:3])
             chars = len(b["text"])
-            summary_rows.append(
-                {
-                    "학생(파일명)": b["name"],
-                    "글자 수": chars,
-                    "분량": (
-                        f"{chars - neis_limit}자 초과"
-                        if neis_limit and chars > neis_limit
-                        else "이내"
-                    )
-                    if neis_limit
-                    else "-",
-                    "위반": n_violation,
-                    "주의": n_caution,
-                    "주요 검출 표현": top_words,
-                }
-            )
+            row = {
+                "학생(파일명)": b["name"],
+                "글자 수": chars,
+                "분량": (
+                    f"{chars - neis_limit}자 초과"
+                    if neis_limit and chars > neis_limit
+                    else "이내"
+                )
+                if neis_limit
+                else "-",
+                "위반": n_violation,
+                "주의": n_caution,
+                "주요 검출 표현": top_words,
+            }
+            if b.get("quality"):
+                avg = quality_avg(b["quality"])
+                row["품질(5점)"] = f"{avg:.1f}" if avg is not None else "-"
+            if b.get("proofread") is not None:
+                row["오탈자"] = len(b["proofread"])
+            summary_rows.append(row)
         if summary_rows:
             summary_df = pd.DataFrame(summary_rows)
             st.dataframe(summary_df, use_container_width=True, hide_index=True)
@@ -1403,6 +1438,102 @@ if mode == "🔍 기재 금지 표현 검토":
                 data=summary_df.to_csv(index=False).encode("utf-8-sig"),
                 file_name="생기부_일괄검토_요약.csv",
                 mime="text/csv",
+            )
+
+        # ── 일괄 후처리: 수정본 / 품질 진단 / 오탈자 ──
+        st.subheader("3️⃣ 일괄 후처리")
+        st.caption(
+            "반 전체에 대해 수정본 생성·품질 진단·오탈자 검사를 병렬로 실행합니다. "
+            "결과는 요약표와 학생별 상세에 반영됩니다."
+        )
+        targets = [b for b in ok if b["findings"]]
+        col_rev, col_q, col_p = st.columns(3)
+
+        if col_rev.button(
+            f"✏️ 전체 수정본 생성 ({len(targets)}명)",
+            use_container_width=True,
+            disabled=not targets,
+        ):
+            def _revise_job(idx: int) -> tuple[str, str]:
+                b = targets[idx]
+                try:
+                    masked_findings = [
+                        {**f, "word": apply_mask(f["word"], mask_map)}
+                        for f in b["findings"]
+                    ]
+                    revised = rewrite_with_gemini(
+                        apply_mask(b["text"], mask_map), masked_findings, major, api_key
+                    )
+                    return remove_mask(revised, mask_map), ""
+                except Exception as e:
+                    return "", str(e)
+
+            outs = run_parallel(len(targets), _revise_job, "수정본 생성 중…")
+            for b, (revised, err) in zip(targets, outs):
+                b["revised"], b["revised_error"] = revised, err
+            st.rerun()
+
+        if col_q.button(f"🏅 전체 품질 진단 ({len(ok)}명)", use_container_width=True):
+            def _quality_job(idx: int) -> tuple[dict | None, str]:
+                b = ok[idx]
+                try:
+                    return (
+                        assess_quality_with_gemini(
+                            apply_mask(b["text"], mask_map), major, api_key
+                        ),
+                        "",
+                    )
+                except Exception as e:
+                    return None, str(e)
+
+            outs = run_parallel(len(ok), _quality_job, "품질 진단 중…")
+            for b, (q, err) in zip(ok, outs):
+                b["quality"], b["quality_error"] = q, err
+            st.rerun()
+
+        if col_p.button(f"🔤 전체 오탈자 검사 ({len(ok)}명)", use_container_width=True):
+            def _proofread_job(idx: int) -> tuple[list | None, str]:
+                b = ok[idx]
+                try:
+                    items = proofread_with_gemini(
+                        apply_mask(b["text"], mask_map), api_key
+                    )
+                    for it in items:
+                        it["wrong"] = remove_mask(it["wrong"], mask_map)
+                        it["correct"] = remove_mask(it["correct"], mask_map)
+                    return items, ""
+                except Exception as e:
+                    return None, str(e)
+
+            outs = run_parallel(len(ok), _proofread_job, "오탈자 검사 중…")
+            for b, (items, err) in zip(ok, outs):
+                b["proofread"], b["proofread_error"] = items, err
+            st.rerun()
+
+        post_errors = [
+            f"{b['name']}({kind}): {b.get(key)}"
+            for b in ok
+            for kind, key in (
+                ("수정본", "revised_error"),
+                ("품질", "quality_error"),
+                ("오탈자", "proofread_error"),
+            )
+            if b.get(key)
+        ]
+        if post_errors:
+            st.error("❌ 일부 후처리 실패 — " + " / ".join(post_errors))
+
+        revised_ok = [b for b in ok if b.get("revised")]
+        if revised_ok:
+            zip_buf = io.BytesIO()
+            with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for b in revised_ok:
+                    zf.writestr(f"{b['name']}_수정본.txt", b["revised"])
+            st.download_button(
+                "📥 전체 수정본 ZIP 다운로드",
+                data=zip_buf.getvalue(),
+                file_name="생기부_수정본_일괄.zip",
+                mime="application/zip",
             )
 
         # 학생 간 유사도 검사
@@ -1426,6 +1557,42 @@ if mode == "🔍 기재 금지 표현 검토":
                     st.success("검출된 기재 금지 표현이 없습니다.")
                 for w in style_check(b["text"]):
                     st.warning(w)
+
+                if b.get("revised"):
+                    st.text_area(
+                        "✏️ 수정본",
+                        value=b["revised"],
+                        height=180,
+                        key=f"batch_revised_{b['name']}",
+                    )
+                    recheck = rule_based_filter(b["revised"], custom_words)
+                    if recheck:
+                        st.warning(
+                            "⚠️ 수정본에서 규칙 기반 금지 패턴이 여전히 검출됩니다: "
+                            + ", ".join(f"「{f['word']}」" for f in recheck)
+                        )
+
+                if b.get("quality"):
+                    st.divider()
+                    render_quality_compact(b["quality"])
+
+                if b.get("proofread") is not None:
+                    st.divider()
+                    if not b["proofread"]:
+                        st.success("🔤 발견된 오탈자가 없습니다.")
+                    else:
+                        st.markdown(f"**🔤 오탈자 {len(b['proofread'])}건**")
+                        st.dataframe(
+                            pd.DataFrame(b["proofread"]).rename(
+                                columns={
+                                    "wrong": "잘못된 표기",
+                                    "correct": "교정안",
+                                    "reason": "사유",
+                                }
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
 # ══════════════════════════════════════════════
 # 모드 2: 세특 초안 작성
@@ -1507,7 +1674,6 @@ else:
 
         if len(eval_files) > 1:
             # ── 일괄 생성 ──
-            progress = st.progress(0.0, text="일괄 초안 생성 중…")
             stems = unique_names([file_stem(f.name) for f in eval_files])
 
             # 파일 읽기는 메인 스레드에서 (UploadedFile은 스레드 안전하지 않음)
@@ -1537,19 +1703,9 @@ else:
                 except Exception as e:
                     return {"name": stem, "draft": "", "error": str(e)}
 
-            batch_results: list[dict] = [{}] * len(inputs)
-            with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
-                futures = {pool.submit(_draft_job, i): i for i in range(len(inputs))}
-                done = 0
-                for fut in as_completed(futures):
-                    batch_results[futures[fut]] = fut.result()
-                    done += 1
-                    progress.progress(
-                        done / len(inputs),
-                        text=f"일괄 초안 생성 중… ({done}/{len(inputs)})",
-                    )
-            progress.empty()
-            st.session_state["batch_drafts"] = batch_results
+            st.session_state["batch_drafts"] = run_parallel(
+                len(inputs), _draft_job, "일괄 초안 생성 중…"
+            )
         else:
             # ── 단일 생성 ──
             with st.spinner(f"세특 초안 생성 중… ({GEMINI_MODEL})"):
@@ -1655,6 +1811,54 @@ else:
                 + ", ".join(b["name"] for b in failed)
             )
 
+        # ── 일괄 후처리: 품질 진단 / 오탈자 ──
+        col_q, col_p = st.columns(2)
+        if col_q.button(f"🏅 전체 품질 진단 ({len(ok)}명)", use_container_width=True):
+            def _dq_job(idx: int) -> tuple[dict | None, str]:
+                b = ok[idx]
+                try:
+                    return (
+                        assess_quality_with_gemini(
+                            apply_mask(b["draft"], mask_map), major, api_key
+                        ),
+                        "",
+                    )
+                except Exception as e:
+                    return None, str(e)
+
+            outs = run_parallel(len(ok), _dq_job, "품질 진단 중…")
+            for b, (q, err) in zip(ok, outs):
+                b["quality"], b["quality_error"] = q, err
+            st.rerun()
+
+        if col_p.button(f"🔤 전체 오탈자 검사 ({len(ok)}명)", use_container_width=True):
+            def _dp_job(idx: int) -> tuple[list | None, str]:
+                b = ok[idx]
+                try:
+                    items = proofread_with_gemini(
+                        apply_mask(b["draft"], mask_map), api_key
+                    )
+                    for it in items:
+                        it["wrong"] = remove_mask(it["wrong"], mask_map)
+                        it["correct"] = remove_mask(it["correct"], mask_map)
+                    return items, ""
+                except Exception as e:
+                    return None, str(e)
+
+            outs = run_parallel(len(ok), _dp_job, "오탈자 검사 중…")
+            for b, (items, err) in zip(ok, outs):
+                b["proofread"], b["proofread_error"] = items, err
+            st.rerun()
+
+        draft_post_errors = [
+            f"{b['name']}({kind}): {b.get(key)}"
+            for b in ok
+            for kind, key in (("품질", "quality_error"), ("오탈자", "proofread_error"))
+            if b.get(key)
+        ]
+        if draft_post_errors:
+            st.error("❌ 일부 후처리 실패 — " + " / ".join(draft_post_errors))
+
         # 초안 간 유사도 검사 (같은 수행평가 기반이라 문장이 겹치기 쉬움)
         st.subheader("👥 초안 간 유사도 검사")
         render_similarity_check([(b["name"], b["draft"]) for b in ok])
@@ -1675,6 +1879,28 @@ else:
                     )
                 for w in style_check(b["draft"]):
                     st.warning(w)
+
+                if b.get("quality"):
+                    st.divider()
+                    render_quality_compact(b["quality"])
+
+                if b.get("proofread") is not None:
+                    st.divider()
+                    if not b["proofread"]:
+                        st.success("🔤 발견된 오탈자가 없습니다.")
+                    else:
+                        st.markdown(f"**🔤 오탈자 {len(b['proofread'])}건**")
+                        st.dataframe(
+                            pd.DataFrame(b["proofread"]).rename(
+                                columns={
+                                    "wrong": "잘못된 표기",
+                                    "correct": "교정안",
+                                    "reason": "사유",
+                                }
+                            ),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
 
         if ok:
             # ZIP 다운로드
