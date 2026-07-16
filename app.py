@@ -20,10 +20,13 @@ import hmac
 import html
 import io
 import json
+import random
 import re
+import time
 import zipfile
 import zlib
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import google.generativeai as genai
 import olefile
@@ -54,6 +57,58 @@ NEIS_LIMITS = {
 
 # 학생 간 유사도 경고 기준 (0~1)
 SIMILARITY_THRESHOLD = 0.55
+
+# 일괄 처리 동시 호출 수 (무료 쿼터에서도 429는 재시도로 흡수)
+BATCH_WORKERS = 4
+
+
+# ──────────────────────────────────────────────
+# Gemini 호출 재시도 래퍼
+# ──────────────────────────────────────────────
+_RETRYABLE_MARKERS = (
+    "429", "500", "503", "quota", "rate limit", "resource exhausted",
+    "deadline", "timeout", "timed out", "unavailable", "internal error",
+    "overloaded", "connection",
+)
+
+
+def _is_retryable_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(m in msg for m in _RETRYABLE_MARKERS)
+
+
+def _gemini_text(model, prompt: str, max_attempts: int = 3) -> str:
+    """generate_content를 재시도(지수 백오프)와 함께 호출하고 본문 텍스트를 반환한다."""
+    last_error: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            response = model.generate_content(prompt)
+            text = (response.text or "").strip()
+            if not text:
+                raise ValueError("Gemini가 빈 응답을 반환했습니다.")
+            return text
+        except Exception as e:
+            last_error = e
+            empty = isinstance(e, ValueError) and "빈 응답" in str(e)
+            if attempt == max_attempts - 1 or not (empty or _is_retryable_error(e)):
+                raise
+            time.sleep(2 * (2**attempt) + random.random())
+    raise last_error  # pragma: no cover — 위에서 항상 raise됨
+
+
+def _strip_code_fence(raw: str) -> str:
+    return re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
+
+
+def _gemini_json(model, prompt: str, parse_attempts: int = 2):
+    """JSON 응답을 기대하는 호출. 파싱 실패 시 전체 호출을 1회 더 재시도한다."""
+    for attempt in range(parse_attempts):
+        raw = _strip_code_fence(_gemini_text(model, prompt))
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            if attempt == parse_attempts - 1:
+                raise
 
 
 # ──────────────────────────────────────────────
@@ -423,13 +478,7 @@ def analyze_with_gemini(text: str, major: str, api_key: str) -> list[dict]:
         "위 텍스트를 심사하여 JSON 배열로만 답하라."
     )
 
-    response = model.generate_content(user_prompt)
-    raw = response.text.strip()
-
-    # 혹시 모를 마크다운 코드펜스 제거 (```json ... ```)
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
-
-    parsed = json.loads(raw)
+    parsed = _gemini_json(model, user_prompt)
     if not isinstance(parsed, list):
         raise ValueError("Gemini 응답이 JSON 배열 형식이 아닙니다.")
 
@@ -515,8 +564,7 @@ def rewrite_with_gemini(
         f"[검토에서 발견된 위반 표현과 대체 추천]\n{findings_lines}\n\n"
         "위 위반 표현을 모두 반영하여 수정된 전체 본문만 출력하라."
     )
-    response = model.generate_content(prompt)
-    return response.text.strip()
+    return _gemini_text(model, prompt)
 
 
 # ──────────────────────────────────────────────
@@ -564,11 +612,7 @@ def assess_quality_with_gemini(text: str, major: str, api_key: str) -> dict:
         f"[평가 대상 세특 텍스트]\n{text}\n\n"
         "위 텍스트를 루브릭으로 평가하여 JSON으로만 답하라."
     )
-    response = model.generate_content(prompt)
-    raw = re.sub(
-        r"^```(?:json)?\s*|\s*```$", "", response.text.strip(), flags=re.MULTILINE
-    ).strip()
-    parsed = json.loads(raw)
+    parsed = _gemini_json(model, prompt)
     if not isinstance(parsed, dict) or "scores" not in parsed:
         raise ValueError("Gemini 응답이 기대한 JSON 형식이 아닙니다.")
     return parsed
@@ -677,8 +721,7 @@ def generate_draft_with_gemini(
 
     parts.append("위 자료를 바탕으로 세특 초안 본문만 출력하라.")
 
-    response = model.generate_content("\n\n".join(parts))
-    return response.text.strip()
+    return _gemini_text(model, "\n\n".join(parts))
 
 
 def refine_draft_with_gemini(
@@ -698,8 +741,7 @@ def refine_draft_with_gemini(
         "기존 초안을 교사 피드백에 맞게 수정하여 세특 초안 본문만 출력하라. "
         "피드백과 무관한 부분은 최대한 유지한다."
     )
-    response = model.generate_content(prompt)
-    return response.text.strip()
+    return _gemini_text(model, prompt)
 
 
 # ──────────────────────────────────────────────
@@ -731,13 +773,9 @@ def proofread_with_gemini(text: str, api_key: str) -> list[dict]:
             "response_mime_type": "application/json",
         },
     )
-    response = model.generate_content(
-        f"[검사 대상 텍스트]\n{text}\n\n오탈자·표기 오류를 JSON 배열로만 답하라."
+    parsed = _gemini_json(
+        model, f"[검사 대상 텍스트]\n{text}\n\n오탈자·표기 오류를 JSON 배열로만 답하라."
     )
-    raw = re.sub(
-        r"^```(?:json)?\s*|\s*```$", "", response.text.strip(), flags=re.MULTILINE
-    ).strip()
-    parsed = json.loads(raw)
     if not isinstance(parsed, list):
         raise ValueError("Gemini 응답이 JSON 배열 형식이 아닙니다.")
     return [
@@ -835,7 +873,7 @@ def adjust_length_with_gemini(text: str, target_len: int, api_key: str) -> str:
         f"[목표 분량]\n공백 포함 {target_len}자 (±5% 이내)\n\n"
         "조절된 본문만 출력하라."
     )
-    result = model.generate_content(prompt).text.strip()
+    result = _gemini_text(model, prompt)
 
     if target_len and abs(len(result) - target_len) / target_len > 0.10:
         direction = "더 줄여라" if len(result) > target_len else "더 늘려라"
@@ -845,7 +883,7 @@ def adjust_length_with_gemini(text: str, target_len: int, api_key: str) -> str:
             f"현재 {len(result)}자이므로 {direction}.\n\n"
             "조절된 본문만 출력하라."
         )
-        result = model.generate_content(retry_prompt).text.strip()
+        result = _gemini_text(model, retry_prompt)
     return result
 
 
@@ -1207,26 +1245,40 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state.pop("quality_review", None)
             st.session_state.pop("proofread_review", None)
 
-            batch_reviews = []
             progress = st.progress(0.0, text="일괄 검토 중…")
             stems = unique_names([file_stem(f.name) for f in review_files])
-            for idx, (f, stem) in enumerate(zip(review_files, stems)):
+
+            # 파일 읽기는 메인 스레드에서 (UploadedFile은 스레드 안전하지 않음)
+            inputs: list[tuple[str, str, str]] = []
+            for f, stem in zip(review_files, stems):
                 try:
-                    text = read_uploaded_file(f)
+                    inputs.append((stem, read_uploaded_file(f), ""))
+                except Exception as e:
+                    inputs.append((stem, "", str(e)))
+
+            def _review_job(idx: int) -> dict:
+                stem, text, err = inputs[idx]
+                if err:
+                    return {"name": stem, "text": "", "findings": [], "error": err}
+                try:
                     findings = review_text_masked(
                         text, major, api_key, custom_words, mask_map
                     )
-                    batch_reviews.append(
-                        {"name": stem, "text": text, "findings": findings, "error": ""}
-                    )
+                    return {"name": stem, "text": text, "findings": findings, "error": ""}
                 except Exception as e:
-                    batch_reviews.append(
-                        {"name": stem, "text": "", "findings": [], "error": str(e)}
+                    return {"name": stem, "text": "", "findings": [], "error": str(e)}
+
+            batch_reviews: list[dict] = [{}] * len(inputs)
+            with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
+                futures = {pool.submit(_review_job, i): i for i in range(len(inputs))}
+                done = 0
+                for fut in as_completed(futures):
+                    batch_reviews[futures[fut]] = fut.result()
+                    done += 1
+                    progress.progress(
+                        done / len(inputs),
+                        text=f"일괄 검토 중… ({done}/{len(inputs)})",
                     )
-                progress.progress(
-                    (idx + 1) / len(review_files),
-                    text=f"일괄 검토 중… ({idx + 1}/{len(review_files)}) {stem}",
-                )
             progress.empty()
             st.session_state["batch_review"] = batch_reviews
         else:
@@ -1470,29 +1522,47 @@ else:
 
         if len(eval_files) > 1:
             # ── 일괄 생성 ──
-            batch_results = []
             progress = st.progress(0.0, text="일괄 초안 생성 중…")
             stems = unique_names([file_stem(f.name) for f in eval_files])
-            for idx, (f, stem) in enumerate(zip(eval_files, stems)):
+
+            # 파일 읽기는 메인 스레드에서 (UploadedFile은 스레드 안전하지 않음)
+            inputs: list[tuple[str, str, str]] = []
+            for f, stem in zip(eval_files, stems):
                 try:
-                    eval_text = read_uploaded_file(f)
+                    inputs.append((stem, read_uploaded_file(f), ""))
+                except Exception as e:
+                    inputs.append((stem, "", str(e)))
+
+            masked_performance = apply_mask(performance_text, mask_map)
+
+            def _draft_job(idx: int) -> dict:
+                stem, eval_text, err = inputs[idx]
+                if err:
+                    return {"name": stem, "draft": "", "error": err}
+                try:
                     draft = generate_draft_with_gemini(
                         subject,
                         major,
-                        apply_mask(performance_text, mask_map),
+                        masked_performance,
                         apply_mask(eval_text, mask_map),
                         target_len,
                         api_key,
                     )
-                    batch_results.append(
-                        {"name": stem, "draft": remove_mask(draft, mask_map), "error": ""}
-                    )
+                    return {"name": stem, "draft": remove_mask(draft, mask_map), "error": ""}
                 except Exception as e:
-                    batch_results.append({"name": stem, "draft": "", "error": str(e)})
-                progress.progress(
-                    (idx + 1) / len(eval_files),
-                    text=f"일괄 초안 생성 중… ({idx + 1}/{len(eval_files)}) {stem}",
-                )
+                    return {"name": stem, "draft": "", "error": str(e)}
+
+            batch_results: list[dict] = [{}] * len(inputs)
+            with ThreadPoolExecutor(max_workers=BATCH_WORKERS) as pool:
+                futures = {pool.submit(_draft_job, i): i for i in range(len(inputs))}
+                done = 0
+                for fut in as_completed(futures):
+                    batch_results[futures[fut]] = fut.result()
+                    done += 1
+                    progress.progress(
+                        done / len(inputs),
+                        text=f"일괄 초안 생성 중… ({done}/{len(inputs)})",
+                    )
             progress.empty()
             st.session_state["batch_drafts"] = batch_results
         else:
