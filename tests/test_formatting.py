@@ -1,5 +1,15 @@
 # -*- coding: utf-8 -*-
-from core.formatting import build_student_report, findings_to_df, highlight_text
+import io
+
+import pandas as pd
+
+from core.formatting import (
+    HIGHLIGHT_STYLE_CAUTION,
+    build_batch_workbook,
+    build_student_report,
+    findings_to_df,
+    highlight_text,
+)
 
 
 def test_highlight_wraps_matched_word_in_span():
@@ -32,6 +42,24 @@ def test_highlight_overlapping_words_single_pass_prefers_longer():
 def test_highlight_preserves_newlines_as_br():
     out = highlight_text("첫줄\n둘째줄", [])
     assert "<br>" in out
+
+
+def test_highlight_severities_produce_both_style_variants():
+    out = highlight_text(
+        "위반어와 주의어가 함께 있음",
+        ["위반어", "주의어"],
+        {"위반어": "위반", "주의어": "주의"},
+    )
+    # 위반 스타일(빨강/노랑 배경)과 주의 스타일(연노랑)이 모두 나타난다.
+    assert "background-color: yellow" in out
+    assert HIGHLIGHT_STYLE_CAUTION in out
+
+
+def test_highlight_default_severity_uses_violation_style():
+    # severities 미지정 시 기존 위반 스타일만 사용된다.
+    out = highlight_text("주의어 포함", ["주의어"])
+    assert "background-color: yellow" in out
+    assert HIGHLIGHT_STYLE_CAUTION not in out
 
 
 def test_findings_to_df_column_names():
@@ -145,3 +173,63 @@ def test_build_student_report_empty_proofread_shows_no_typo_line():
     )
     assert "[오탈자]" in report
     assert "발견된 오탈자 없음" in report
+
+
+def _batch_two_students():
+    return [
+        {
+            "name": "학생A",
+            "text": "의사인 아버지의 영향을 받아 TOEIC 900점을 취득함.",
+            "findings": [
+                {
+                    "word": "TOEIC",
+                    "reason": "공인어학시험",
+                    "basis": "기재요령: 공인어학시험 성적 기재 불가",
+                    "severity": "위반",
+                    "suggestion_1": "영어 실력",
+                    "suggestion_2": "영어 역량",
+                }
+            ],
+        },
+        {
+            "name": "학생B",
+            "text": "성실하게 참여함.",
+            "findings": [],
+        },
+    ]
+
+
+def test_build_batch_workbook_returns_readable_bytes():
+    data = build_batch_workbook(_batch_two_students(), neis_limit=500)
+    assert isinstance(data, bytes)
+
+    summary = pd.read_excel(io.BytesIO(data), sheet_name="요약")
+    assert len(summary) == 2
+    assert "학생" in summary.columns
+
+    detail = pd.read_excel(io.BytesIO(data), sheet_name="검출 상세")
+    assert len(detail) == 1
+    assert set(["학생", "검출어", "심각도", "사유", "근거", "추천1", "추천2"]).issubset(
+        detail.columns
+    )
+    assert detail.iloc[0]["검출어"] == "TOEIC"
+
+
+def test_build_batch_workbook_omits_revised_sheet_when_none():
+    data = build_batch_workbook(_batch_two_students())
+    xls = pd.ExcelFile(io.BytesIO(data))
+    assert "수정본" not in xls.sheet_names
+
+
+def test_build_batch_workbook_includes_revised_sheet_when_present():
+    batch = _batch_two_students()
+    batch[0]["revised"] = "영어 역량을 길러 온 학생임."
+    data = build_batch_workbook(batch)
+    xls = pd.ExcelFile(io.BytesIO(data))
+    assert "수정본" in xls.sheet_names
+
+
+def test_build_batch_workbook_empty_batch_summary_only():
+    data = build_batch_workbook([])
+    xls = pd.ExcelFile(io.BytesIO(data))
+    assert xls.sheet_names == ["요약"]
