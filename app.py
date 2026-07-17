@@ -51,8 +51,10 @@ from core.masking import (
     suggest_mask_candidates,
 )
 from core.parsing import (
+    build_eval_template,
     file_stem,
     guess_roster_columns,
+    parse_eval_table,
     parse_roster_table,
     read_uploaded_file,
     unique_names,
@@ -546,6 +548,119 @@ def render_ignore_control(findings: list[dict], key: str) -> list[dict]:
 
 
 # ──────────────────────────────────────────────
+# 사용 안내 (인앱 사용 설명서)
+# ──────────────────────────────────────────────
+def render_guide() -> None:
+    """앱 전체 사용법을 단계별로 안내하는 도움말 화면."""
+    st.subheader("📖 사용 안내")
+    st.caption(
+        "이 도구는 ① 생기부 **기재 금지 표현 검토**와 ② 세특 **초안 작성**, "
+        "두 가지 작업을 도와줍니다. 위쪽 모드 선택에서 원하는 작업을 고른 뒤 아래 흐름을 따라가세요."
+    )
+
+    # ── (a) 전체 워크플로 ──
+    st.subheader("① 전체 워크플로")
+    col_r, col_w = st.columns(2)
+    with col_r:
+        with st.container(border=True):
+            st.markdown("### 🔍 검토 워크플로")
+            st.markdown(
+                "1️⃣ 사이드바 설정 — 희망 진로 · NEIS 항목/분량 기준 · 개인정보 마스킹\n\n"
+                "2️⃣ 파일 업로드 — txt · hwp · hwpx · docx · pdf 여러 개, "
+                "또는 반 전체 명렬표 xlsx · csv 1개 (또는 직접 붙여넣기)\n\n"
+                "3️⃣ **🔍 검토 실행**\n\n"
+                "4️⃣ 결과 확인 — 위반 표현 하이라이트 · 수정본 자동 생성 · 품질 진단 · 오탈자 검사\n\n"
+                "5️⃣ 다운로드 — 심사결과 CSV · 종합 엑셀 · 나이스 입력용 엑셀 · 개인별 리포트 ZIP"
+            )
+    with col_w:
+        with st.container(border=True):
+            st.markdown("### ✍️ 초안 워크플로")
+            st.markdown(
+                "1️⃣ 과목명 · 수행평가 활동 내용 입력\n\n"
+                "2️⃣ 자기평가서 업로드 — 파일 여러 개, 또는 엑셀 양식 1개 (없어도 진행 가능)\n\n"
+                "3️⃣ (선택) 예시 세특 문체 참고 · **⚖️ 2버전 생성 후 비교** 토글\n\n"
+                "4️⃣ **✍️ 초안 생성**\n\n"
+                "5️⃣ 다듬기 — 피드백 반영 재생성 · 분량 조절 · 품질 진단 · 오탈자 검사"
+            )
+
+    # ── (b) 파일 형식 안내 ──
+    st.subheader("② 파일 형식 안내")
+    st.markdown(
+        "| 형식 | 어디에 쓰나요 | 비고 |\n"
+        "| --- | --- | --- |\n"
+        "| **txt** | 생기부·자기평가서·예시 세특 | 순수 텍스트 |\n"
+        "| **hwp / hwpx** | 생기부·자기평가서·예시 세특 | 한글 문서 |\n"
+        "| **docx** | 생기부·자기평가서·예시 세특 | Word 문서 |\n"
+        "| **pdf** | 생기부·자기평가서 | 텍스트형 PDF만 가능 · 스캔본(이미지)은 불가 |\n"
+        "| **xlsx / csv** | 반 전체 명렬표 · 엑셀 자기평가서 | **단독으로 1개만** 업로드 · 1열은 이름, 나머지 열은 내용 |"
+    )
+    st.caption(
+        "여러 파일을 올리면 반 전체 일괄 처리가 됩니다. "
+        "명렬표·엑셀 자기평가서는 다른 파일과 섞지 말고 한 개만 단독으로 올려주세요."
+    )
+
+    # ── (c) 사이드바 기능 표 ──
+    st.subheader("③ 사이드바 기능")
+    st.markdown(
+        "| 기능 | 설명 | 언제 쓰나요 |\n"
+        "| --- | --- | --- |\n"
+        "| **개인정보 마스킹** | 등록한 단어를 전송 전 《비공개n》으로 치환하고 결과에서 복원 | 학생 이름·학번 등 개인정보 보호 |\n"
+        "| **마스킹 자동 제안** | 개인정보로 보이는 표현을 찾아 목록 추가 제안 | 마스킹 누락 방지 |\n"
+        "| **희망 진로/학과** | 대체 표현 추천·진로 연계 서술에 활용 | 검토·초안 모두 |\n"
+        "| **NEIS 항목 · 분량 기준** | 항목별 글자 수 제한 기준으로 초과 검사 (글자 수 또는 바이트) | 분량 초과 점검 |\n"
+        "| **사용자 정의 금칙어** | 학교명 등 반드시 걸러야 할 단어를 규칙 검출에 추가 | 학교·학원명 차단 |\n"
+        "| **작업 이력** | 이번 세션 결과를 시각과 함께 기록 · TXT 다운로드 | 이전 결과 되찾기 |\n"
+        "| **오탐 무시 목록** | 오탐으로 표시한 검출어를 이후 결과에서 제외 | 반복되는 오탐 정리 |\n"
+        "| **프로젝트 저장/복원** | 세션 작업 상태를 JSON으로 저장·복원 | 작업 중단 후 이어하기 |"
+    )
+
+    # ── (d) 자주 묻는 질문 ──
+    st.subheader("④ 자주 묻는 질문")
+    with st.expander("결과가 사라졌어요"):
+        st.markdown(
+            "새로고침·재실행 시 화면 결과는 초기화될 수 있습니다. "
+            "사이드바 **💾 프로젝트 저장(JSON)** 으로 작업 상태를 파일로 보관했다가 "
+            "**📂 복원 실행**으로 되돌릴 수 있고, **🕘 작업 이력**에서 이전 결과 TXT를 다시 받을 수 있습니다."
+        )
+    with st.expander("학생 이름이 외부로 전송되나요?"):
+        st.markdown(
+            "입력 텍스트는 Google Gemini API(외부 서버)로 전송됩니다. "
+            "다만 사이드바 **개인정보 마스킹 단어**에 등록한 단어는 전송 직전 《비공개n》 토큰으로 치환되고, "
+            "돌아온 결과에서 원래 단어로 자동 복원됩니다. "
+            "이름·학번 등은 마스킹 목록에 등록해 주세요(자동 제안도 활용)."
+        )
+    with st.expander("일괄 검토에서 실패한 학생이 있어요"):
+        st.markdown(
+            "일시적 오류(예: 호출 한도)는 자동으로 재시도됩니다. "
+            "한 학생이 최종 실패해도 나머지 학생 처리는 그대로 진행되며(개별 실패 격리), "
+            "실패한 학생 이름은 결과 상단에 따로 표시됩니다. 해당 학생만 다시 실행하면 됩니다."
+        )
+    with st.expander("명렬표/자기평가서 엑셀은 어떤 모양이어야 하나요?"):
+        st.markdown(
+            "**1열은 이름**, 나머지 열은 내용(생기부 문장 또는 자기평가 문항)입니다. 열 이름은 자유입니다. "
+            "이 파일 **1개만** 단독으로 올리면 표 안 학생 전체가 일괄 처리됩니다. "
+            "초안 모드의 **📄 자기평가서 엑셀 양식 다운로드** 버튼에서 표준 양식을 받을 수 있습니다."
+        )
+    with st.expander("분량 기준의 '글자 수'와 '바이트'는 뭐가 다른가요?"):
+        st.markdown(
+            "**글자 수(공백 포함)** 는 문자 개수 기준이고, "
+            "**NEIS 바이트** 는 나이스 저장 기준으로 한글 1자를 3바이트로 계산합니다. "
+            "바이트 기준을 고르면 항목별 글자 수 제한을 ×3으로 환산해 초과 여부를 판정합니다."
+        )
+    with st.expander("2버전 비교는 비용이 더 드나요?"):
+        st.markdown(
+            "**⚖️ 2버전 생성 후 비교**를 켜면 초안을 두 번 생성하므로 API 호출이 **2배**가 됩니다. "
+            "서로 다른 두 버전을 나란히 보고 마음에 드는 쪽을 고르고 싶을 때 사용하세요."
+        )
+
+    # ── (e) 안전 고지 ──
+    st.warning(
+        "⚠️ 본 도구의 결과는 **참고용 초안/심사**입니다. 최종 기재 내용은 반드시 "
+        "당해 연도 교육부 「학교생활기록부 기재요령」 원문을 확인한 뒤 **교사가 직접 작성·확정**하시기 바랍니다."
+    )
+
+
+# ──────────────────────────────────────────────
 # 접근 암호 게이트 (배포용)
 # ──────────────────────────────────────────────
 def check_password() -> bool:
@@ -730,9 +845,16 @@ with st.sidebar:
 # ── 모드 선택 ──
 mode = st.radio(
     "모드를 선택하세요.",
-    ["🔍 기재 금지 표현 검토", "✍️ 세특 초안 작성"],
+    ["🔍 기재 금지 표현 검토", "✍️ 세특 초안 작성", "📖 사용 안내"],
     horizontal=True,
 )
+
+# 첫 방문 안내 배너 (세션당 1회, 안내 모드에서는 표시하지 않음)
+if not st.session_state.get("seen_guide_hint") and mode != "📖 사용 안내":
+    st.info(
+        "💡 처음이신가요? 위에서 **📖 사용 안내**를 선택하면 전체 사용법을 단계별로 볼 수 있습니다."
+    )
+    st.session_state["seen_guide_hint"] = True
 
 st.divider()
 
@@ -744,7 +866,7 @@ if mode == "🔍 기재 금지 표현 검토":
 
     input_method = st.radio(
         "입력 방식을 선택하세요.",
-        ["파일 업로드 (.txt / .hwp / .hwpx / .docx / 명렬표 .csv·.xlsx — 여러 개 가능)", "직접 붙여넣기"],
+        ["파일 업로드 (.txt / .hwp / .hwpx / .docx / .pdf / 명렬표 .csv·.xlsx — 여러 개 가능)", "직접 붙여넣기"],
         horizontal=True,
     )
 
@@ -761,7 +883,7 @@ if mode == "🔍 기재 금지 표현 검토":
         review_files = st.file_uploader(
             "생기부 파일 또는 반 전체 명렬표(.csv/.xlsx)를 업로드하세요. "
             "여러 개 올리면 반 전체 일괄 검토가 됩니다. 명렬표는 한 개만 단독으로 올려주세요.",
-            type=["txt", "hwp", "hwpx", "docx", "csv", "xlsx"],
+            type=["txt", "hwp", "hwpx", "docx", "pdf", "csv", "xlsx"],
             accept_multiple_files=True,
             key="review_files",
         )
@@ -1246,6 +1368,12 @@ if mode == "🔍 기재 금지 표현 검토":
                         )
 
 # ══════════════════════════════════════════════
+# 사용 안내
+# ══════════════════════════════════════════════
+elif mode == "📖 사용 안내":
+    render_guide()
+
+# ══════════════════════════════════════════════
 # 모드 2: 세특 초안 작성
 # ══════════════════════════════════════════════
 else:
@@ -1269,12 +1397,25 @@ else:
     )
 
     eval_files = st.file_uploader(
-        "학생 자기평가서 업로드 (선택, .hwp / .hwpx / .txt / .docx — 여러 개 선택 가능)",
-        type=["hwp", "hwpx", "txt", "docx"],
+        "학생 자기평가서 업로드 (선택, .hwp / .hwpx / .txt / .docx / .pdf / 엑셀 일괄 .xlsx·.csv — 여러 개 선택 가능)",
+        type=["hwp", "hwpx", "txt", "docx", "pdf", "xlsx", "csv"],
         key="eval_files",
         accept_multiple_files=True,
         help="1개 업로드 시 단일 초안, 2개 이상 업로드 시 학생별 일괄 생성됩니다. "
+        "엑셀·CSV 자기평가서를 1개 올리면 표의 학생 전체가 일괄 생성됩니다. "
         "파일명에 학번·이름을 넣어두면 결과 구분이 쉽습니다.",
+    )
+    st.download_button(
+        "📄 자기평가서 엑셀 양식 다운로드",
+        data=build_eval_template(),
+        file_name="자기평가서_양식.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="eval_template_dl",
+    )
+    st.caption(
+        "엑셀 양식 구조: **1열은 이름**, 나머지 열은 자기평가 문항입니다 "
+        "(열 이름은 자유롭게 정할 수 있습니다). 이 파일 1개만 올리면 표 안의 "
+        "학생 전체 초안이 한 번에 생성됩니다."
     )
 
     style_files = st.file_uploader(
@@ -1299,9 +1440,52 @@ else:
     if style_examples:
         st.caption(f"🖋️ 문체 참고 예시 {len(style_examples)}개 적용 — 내용은 사용되지 않습니다.")
 
+    # 엑셀 자기평가서(일괄) 모드 상태
+    is_eval_table = False
+    eval_mixed = False
+    eval_df = None
+    eval_name_col = None
+    eval_content_cols = None
+    eval_spreadsheets = [
+        f for f in eval_files if f.name.lower().endswith((".csv", ".xlsx"))
+    ]
+
     # 단일 파일 미리보기
     single_eval_text = ""
-    if len(eval_files) == 1:
+    if eval_spreadsheets and len(eval_files) > 1:
+        # 엑셀 자기평가서와 다른 파일이 섞여 있으면 실행하지 않는다.
+        eval_mixed = True
+        st.error("❌ 엑셀 자기평가서는 단독으로 업로드해 주세요.")
+    elif len(eval_spreadsheets) == 1:
+        # ── 엑셀 자기평가서(일괄) 모드 ──
+        is_eval_table = True
+        f = eval_spreadsheets[0]
+        try:
+            if f.name.lower().endswith(".csv"):
+                try:
+                    eval_df = pd.read_csv(io.BytesIO(f.getvalue()), encoding="utf-8")
+                except UnicodeDecodeError:
+                    eval_df = pd.read_csv(io.BytesIO(f.getvalue()), encoding="cp949")
+            else:
+                eval_df = pd.read_excel(io.BytesIO(f.getvalue()))
+        except Exception as e:
+            st.error(f"❌ 엑셀 자기평가서를 읽지 못했습니다: {e}")
+            eval_df = None
+        if eval_df is not None and not eval_df.empty:
+            st.success(f"✅ 엑셀 자기평가서 로드 완료 ({len(eval_df):,}행)")
+            st.dataframe(eval_df.head(5), use_container_width=True)
+            guess_name, _ = guess_roster_columns(eval_df)
+            cols = list(eval_df.columns)
+            eval_name_col = st.selectbox(
+                "이름 열", cols, index=cols.index(guess_name), key="eval_name_col"
+            )
+            eval_content_cols = st.multiselect(
+                "자기평가 문항 열 (여러 개 선택 가능)",
+                [c for c in cols if c != eval_name_col],
+                default=[c for c in cols if c != eval_name_col],
+                key="eval_content_cols",
+            )
+    elif len(eval_files) == 1:
         try:
             single_eval_text = read_uploaded_file(eval_files[0])
             if single_eval_text.strip():
@@ -1344,7 +1528,10 @@ else:
         if not api_key.strip():
             st.warning("⚠️ 서버에 Gemini API Key가 설정되지 않아 실행할 수 없습니다.")
             st.stop()
-        if not major.strip() and len(eval_files) <= 1:
+        if eval_mixed:
+            st.error("❌ 엑셀 자기평가서는 단독으로 업로드해 주세요. 엑셀만 남기고 다시 실행해 주세요.")
+            st.stop()
+        if not major.strip() and len(eval_files) <= 1 and not is_eval_table:
             st.warning("⚠️ 사이드바에 학생의 희망 진로/학과를 입력해 주세요. (자기평가서에 장래희망이 있다면 그대로 진행됩니다)")
         if not performance_text.strip() and not eval_files:
             st.warning("⚠️ 수행평가 활동 내용을 입력하거나 자기평가서 파일을 업로드해 주세요.")
@@ -1356,17 +1543,33 @@ else:
         st.session_state.pop("quality_draft", None)
         st.session_state.pop("proofread_draft", None)
 
-        if len(eval_files) > 1:
+        if len(eval_files) > 1 or is_eval_table:
             # ── 일괄 생성 ──
-            stems = unique_names([file_stem(f.name) for f in eval_files])
+            if is_eval_table:
+                # 엑셀 자기평가서: 표에서 (이름, 자기평가 텍스트) 목록을 만든다.
+                if eval_df is None or eval_df.empty:
+                    st.warning("⚠️ 엑셀 자기평가서에서 읽을 데이터가 없습니다.")
+                    st.stop()
+                if not eval_content_cols:
+                    st.warning("⚠️ 자기평가 문항 열을 하나 이상 선택해 주세요.")
+                    st.stop()
+                entries = parse_eval_table(eval_df, eval_name_col, eval_content_cols)
+                if not entries:
+                    st.warning("⚠️ 이름·자기평가 내용이 채워진 행이 없습니다. 열 선택을 확인해 주세요.")
+                    st.stop()
+                inputs: list[tuple[str, str, str]] = [
+                    (name, text, "") for name, text in entries
+                ]
+            else:
+                stems = unique_names([file_stem(f.name) for f in eval_files])
 
-            # 파일 읽기는 메인 스레드에서 (UploadedFile은 스레드 안전하지 않음)
-            inputs: list[tuple[str, str, str]] = []
-            for f, stem in zip(eval_files, stems):
-                try:
-                    inputs.append((stem, read_uploaded_file(f), ""))
-                except Exception as e:
-                    inputs.append((stem, "", str(e)))
+                # 파일 읽기는 메인 스레드에서 (UploadedFile은 스레드 안전하지 않음)
+                inputs = []
+                for f, stem in zip(eval_files, stems):
+                    try:
+                        inputs.append((stem, read_uploaded_file(f), ""))
+                    except Exception as e:
+                        inputs.append((stem, "", str(e)))
 
             masked_performance = apply_mask(performance_text, mask_map)
             masked_style_examples = [apply_mask(x, mask_map) for x in style_examples]

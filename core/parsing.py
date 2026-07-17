@@ -107,6 +107,22 @@ def extract_docx_text(data: bytes) -> str:
     return "\n".join(paragraphs).rstrip()
 
 
+def extract_pdf_text(data: bytes) -> str:
+    """PDF 파일에서 페이지별 텍스트를 추출해 줄바꿈으로 이어 붙인다.
+
+    스캔 이미지 PDF 등 텍스트 레이어가 없어 추출 결과가 비면 ValueError를 낸다.
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(data))
+    text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
+    if not text:
+        raise ValueError(
+            "PDF에서 텍스트를 찾지 못했습니다. 스캔 이미지 PDF는 지원되지 않습니다."
+        )
+    return text
+
+
 def read_uploaded_file(uploaded_file) -> str:
     """업로드 파일의 확장자에 따라 텍스트를 추출한다."""
     name = uploaded_file.name.lower()
@@ -118,6 +134,8 @@ def read_uploaded_file(uploaded_file) -> str:
         return extract_hwpx_text(data)
     if name.endswith(".docx"):
         return extract_docx_text(data)
+    if name.endswith(".pdf"):
+        return extract_pdf_text(data)
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
@@ -125,7 +143,7 @@ def read_uploaded_file(uploaded_file) -> str:
 
 
 def file_stem(name: str) -> str:
-    return re.sub(r"\.(hwp|hwpx|txt|docx)$", "", name, flags=re.IGNORECASE)
+    return re.sub(r"\.(hwp|hwpx|txt|docx|pdf)$", "", name, flags=re.IGNORECASE)
 
 
 def unique_names(names: list[str]) -> list[str]:
@@ -188,3 +206,52 @@ def guess_roster_columns(df) -> tuple[str, str]:
     if text_col is None:
         text_col = columns[-1]
     return name_col, text_col
+
+
+# ──────────────────────────────────────────────
+# 엑셀 자기평가서(.csv/.xlsx) 일괄 파싱
+# ──────────────────────────────────────────────
+def parse_eval_table(df, name_col: str, content_cols: list[str]) -> list[tuple[str, str]]:
+    """엑셀 자기평가서에서 (이름, 자기평가 텍스트) 목록을 만든다.
+
+    선택한 문항 열들을 "[문항명] 값" 형태로 이어 붙인다(빈·NaN 셀은 건너뜀).
+    이름이 비었거나 합쳐진 텍스트가 빈 행은 제외하고, 중복 이름은 순번을 붙인다.
+    행 순서는 그대로 유지한다.
+    """
+    names: list[str] = []
+    texts: list[str] = []
+    for _, row in df.iterrows():
+        if pd.isna(row[name_col]):
+            continue
+        name = str(row[name_col]).strip()
+        if not name:
+            continue
+        parts = []
+        for col in content_cols:
+            if pd.isna(row[col]):
+                continue
+            value = str(row[col]).strip()
+            if value:
+                parts.append(f"[{col}] {value}")
+        merged = "\n\n".join(parts)
+        if not merged:
+            continue
+        names.append(name)
+        texts.append(merged)
+    return list(zip(unique_names(names), texts))
+
+
+def build_eval_template() -> bytes:
+    """자기평가서 일괄 업로드용 엑셀 양식(.xlsx) 바이트를 생성한다."""
+    df = pd.DataFrame(
+        {
+            "이름": ["김철수"],
+            "활동 내용": ["파이썬으로 급식 잔반 데이터를 분석함"],
+            "배우고 느낀 점": ["데이터 수집의 어려움과 협업의 중요성을 배움"],
+            "진로 연계": ["데이터 분석 직무에 관심이 생김"],
+        }
+    )
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="자기평가서")
+    return buf.getvalue()

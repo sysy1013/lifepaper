@@ -4,12 +4,18 @@ import zipfile
 
 import pandas as pd
 
+import pytest
+
 from core.parsing import (
+    build_eval_template,
     extract_docx_text,
     extract_hwpx_text,
+    extract_pdf_text,
     file_stem,
     guess_roster_columns,
+    parse_eval_table,
     parse_roster_table,
+    read_uploaded_file,
     unique_names,
 )
 
@@ -18,8 +24,9 @@ def test_file_stem_strips_known_extensions():
     assert file_stem("홍길동.hwp") == "홍길동"
     assert file_stem("자기평가서.HWPX") == "자기평가서"
     assert file_stem("메모.txt") == "메모"
+    assert file_stem("보고서.pdf") == "보고서"
     # 알 수 없는 확장자는 그대로 둔다.
-    assert file_stem("보고서.pdf") == "보고서.pdf"
+    assert file_stem("데이터.xlsx") == "데이터.xlsx"
 
 
 def test_unique_names_suffixes_duplicates():
@@ -129,3 +136,73 @@ def test_guess_roster_columns_picks_short_name_and_long_text():
     name_col, text_col = guess_roster_columns(df)
     assert name_col == "이름"
     assert text_col == "자기평가"
+
+
+# ──────────────────────────────────────────────
+# .pdf 추출
+# ──────────────────────────────────────────────
+def test_extract_pdf_text_raises_on_no_text():
+    # 빈 페이지 PDF는 텍스트 레이어가 없으므로 ValueError를 낸다.
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    buf = io.BytesIO()
+    writer.write(buf)
+    with pytest.raises(ValueError):
+        extract_pdf_text(buf.getvalue())
+
+
+class _FakeUpload:
+    def __init__(self, name: str, data: bytes):
+        self.name = name
+        self._data = data
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
+def test_read_uploaded_file_routes_pdf(monkeypatch):
+    # .pdf 확장자는 extract_pdf_text로 위임된다.
+    called = {}
+
+    def fake_extract(data: bytes) -> str:
+        called["data"] = data
+        return "PDF 본문"
+
+    monkeypatch.setattr("core.parsing.extract_pdf_text", fake_extract)
+    result = read_uploaded_file(_FakeUpload("보고서.PDF", b"%PDF-1.4 fake"))
+    assert result == "PDF 본문"
+    assert called["data"] == b"%PDF-1.4 fake"
+
+
+# ──────────────────────────────────────────────
+# 엑셀 자기평가서 파싱 / 양식
+# ──────────────────────────────────────────────
+def test_parse_eval_table_merges_cols_skips_empty_dedups():
+    df = pd.DataFrame(
+        {
+            "이름": ["김철수", "이영희", "  ", "김철수", None],
+            "활동": ["데이터 분석", "설문 조사", "행", "코딩", "행"],
+            "느낀점": ["협업 중요", None, "느낀점만", "", "느낀점"],
+        }
+    )
+    result = parse_eval_table(df, "이름", ["활동", "느낀점"])
+    # 선택 열을 [헤더] 접두로 병합, 빈 셀은 건너뜀, 이름 공백/NaN 행 제외,
+    # 중복 이름은 순번, 전부 빈 행 제외, 순서 유지.
+    assert result == [
+        ("김철수", "[활동] 데이터 분석\n\n[느낀점] 협업 중요"),
+        ("이영희", "[활동] 설문 조사"),
+        ("김철수 (2)", "[활동] 코딩"),
+    ]
+
+
+def test_parse_eval_table_drops_rows_with_all_empty_content():
+    df = pd.DataFrame({"이름": ["김철수", "이영희"], "활동": ["활동A", "   "]})
+    assert parse_eval_table(df, "이름", ["활동"]) == [("김철수", "[활동] 활동A")]
+
+
+def test_build_eval_template_readable_with_expected_headers():
+    df = pd.read_excel(io.BytesIO(build_eval_template()))
+    assert list(df.columns) == ["이름", "활동 내용", "배우고 느낀 점", "진로 연계"]
+    assert df.iloc[0]["이름"] == "김철수"
