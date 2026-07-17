@@ -13,6 +13,7 @@ from core.masking import apply_mask, remove_mask
 from core.rules import rule_based_filter
 
 GEMINI_MODEL = "gemini-2.5-flash"
+FALLBACK_MODEL = "gemini-flash-lite-latest"  # 주 모델 503 과부하 시 1회 폴백
 
 
 # ──────────────────────────────────────────────
@@ -27,9 +28,9 @@ class _GeminiModel:
             system_instruction=system_instruction, **config
         )
 
-    def generate_content(self, prompt: str):
+    def generate_content(self, prompt: str, model_name: str | None = None):
         return self._client.models.generate_content(
-            model=GEMINI_MODEL, contents=prompt, config=self._config
+            model=model_name or GEMINI_MODEL, contents=prompt, config=self._config
         )
 
 
@@ -71,7 +72,17 @@ def _gemini_text(model, prompt: str, max_attempts: int = 3) -> str:
         except Exception as e:
             last_error = e
             empty = isinstance(e, ValueError) and "빈 응답" in str(e)
-            if attempt == max_attempts - 1 or not (empty or _is_retryable_error(e)):
+            if attempt == max_attempts - 1:
+                if _is_retryable_error(e):
+                    try:
+                        response = model.generate_content(prompt, model_name=FALLBACK_MODEL)
+                        text = (response.text or "").strip()
+                        if text:
+                            return text
+                    except Exception:
+                        pass
+                raise
+            if not (empty or _is_retryable_error(e)):
                 raise
             time.sleep(2 * (2**attempt) + random.random())
     raise last_error  # pragma: no cover — 위에서 항상 raise됨

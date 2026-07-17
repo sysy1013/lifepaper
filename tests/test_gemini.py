@@ -5,6 +5,8 @@ import pytest
 
 from core.gemini import (
     CATEGORY_GUIDES,
+    FALLBACK_MODEL,
+    GEMINI_MODEL,
     _gemini_json,
     _gemini_text,
     _strip_code_fence,
@@ -27,10 +29,12 @@ class _StubModel:
     def __init__(self, behaviors):
         self.behaviors = list(behaviors)
         self.calls = 0
+        self.model_names = []
 
-    def generate_content(self, prompt):
+    def generate_content(self, prompt, model_name=None):
         b = self.behaviors[self.calls]
         self.calls += 1
+        self.model_names.append(model_name)
         if isinstance(b, Exception):
             raise b
         return _Resp(b)
@@ -50,10 +54,11 @@ def test_gemini_text_retries_on_retryable_then_succeeds():
 
 
 def test_gemini_text_gives_up_after_max_attempts():
+    # 마지막 재시도 실패 후 폴백 1회를 더 시도하지만 그것도 503으로 실패한다 → 총 4회 호출.
     model = _StubModel([Exception("503 unavailable")] * 5)
     with pytest.raises(Exception):
         _gemini_text(model, "p", max_attempts=3)
-    assert model.calls == 3
+    assert model.calls == 4
 
 
 def test_gemini_text_no_retry_on_non_retryable():
@@ -67,6 +72,31 @@ def test_gemini_text_retries_on_empty_response():
     model = _StubModel(["", "복구된 응답"])
     assert _gemini_text(model, "p") == "복구된 응답"
     assert model.calls == 2
+
+
+# ── _gemini_text 폴백 ──
+def test_gemini_text_falls_back_after_final_retryable_failure():
+    model = _StubModel(
+        [Exception("503 unavailable")] * 3 + ["폴백 응답 텍스트"]
+    )
+    assert _gemini_text(model, "p", max_attempts=3) == "폴백 응답 텍스트"
+    assert model.calls == 4
+    assert model.model_names[-1] == FALLBACK_MODEL
+
+
+def test_gemini_text_no_fallback_on_non_retryable():
+    model = _StubModel([Exception("401 unauthorized"), "should-not-reach"])
+    with pytest.raises(Exception):
+        _gemini_text(model, "p")
+    assert model.calls == 1
+
+
+def test_gemini_text_fallback_also_fails_raises_original_error():
+    model = _StubModel([Exception("503 unavailable")] * 4)
+    with pytest.raises(Exception, match="503"):
+        _gemini_text(model, "p", max_attempts=3)
+    assert model.calls == 4
+    assert model.model_names[-1] == FALLBACK_MODEL
 
 
 # ── _gemini_json ──
