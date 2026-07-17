@@ -37,6 +37,7 @@ from core.gemini import (
     GEMINI_MODEL,
     adjust_length_with_gemini,
     assess_quality_with_gemini,
+    category_for_neis_item,
     generate_draft_with_gemini,
     proofread_with_gemini,
     quality_avg,
@@ -292,9 +293,18 @@ def render_quality_block(text: str, major: str, api_key: str, state_key: str) ->
 # Gemini 오탈자·맞춤법 검사 결과 표시
 # ──────────────────────────────────────────────
 def render_proofread_block(
-    text: str, api_key: str, mask_map: list[tuple[str, str]], state_key: str
+    text: str,
+    api_key: str,
+    mask_map: list[tuple[str, str]],
+    state_key: str,
+    apply_to_key: str | None = None,
+    clear_keys: tuple[str, ...] = (),
 ) -> None:
-    """오탈자 검사 실행 버튼 + 결과(표·하이라이트·교정 반영본) 표시 블록."""
+    """오탈자 검사 실행 버튼 + 결과(표·하이라이트·교정 반영본) 표시 블록.
+
+    apply_to_key가 주어지면 교정 반영본을 해당 세션 키(예: draft_text)에
+    원클릭으로 덮어쓰는 버튼을 함께 표시한다.
+    """
     st.subheader("🔤 오탈자·맞춤법 검사")
     st.caption("오탈자·맞춤법·띄어쓰기·조사 오용을 검사합니다. 개조식 어미는 오류로 보지 않습니다.")
     if st.button("오탈자 검사 실행", key=f"btn_{state_key}", use_container_width=True):
@@ -339,6 +349,18 @@ def render_proofread_block(
             height=200,
             key=f"ta_{state_key}",
         )
+        if apply_to_key:
+            if st.button(
+                "✅ 교정 반영본을 본문에 적용",
+                key=f"apply_{state_key}",
+                use_container_width=True,
+            ):
+                st.session_state[apply_to_key] = corrected
+                record_history("오탈자 교정 반영", corrected)
+                st.session_state.pop(state_key, None)
+                for k in clear_keys:
+                    st.session_state.pop(k, None)
+                st.rerun()
     missing = len(items) - len(found)
     if missing:
         st.caption(f"ℹ️ {missing}건은 원문에서 정확한 위치를 찾지 못해 표로만 표시했습니다.")
@@ -1075,12 +1097,39 @@ if mode == "🔍 기재 금지 표현 검토":
                 else:
                     st.success("✅ 수정본에서 규칙 기반 금지 패턴이 검출되지 않았습니다.")
 
-                st.download_button(
+                col_dl, col_re = st.columns(2)
+                col_dl.download_button(
                     "📥 수정본 TXT 다운로드",
                     data=revised.encode("utf-8"),
                     file_name="생기부_수정본.txt",
                     mime="text/plain",
+                    use_container_width=True,
                 )
+                # 수정본을 새 원문으로 삼아 검토 루프를 다시 돈다
+                if col_re.button(
+                    "🔁 이 수정본 다시 검토", use_container_width=True
+                ):
+                    with st.spinner(f"수정본 재검토 중… ({GEMINI_MODEL})"):
+                        try:
+                            new_findings = review_text_masked(
+                                revised, major, api_key, custom_words, mask_map
+                            )
+                            st.session_state["review_result"] = {
+                                "text": revised,
+                                "findings": new_findings,
+                            }
+                            for k in (
+                                "revised_text",
+                                "quality_review",
+                                "proofread_review",
+                            ):
+                                st.session_state.pop(k, None)
+                            record_history(
+                                f"수정본 재검토: {len(new_findings)}건 검출", revised
+                            )
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ 재검토 실패: {e}")
 
         st.divider()
         render_quality_block(
@@ -1384,7 +1433,17 @@ else:
         "없으면 수행평가 내용을 기반으로 1건을 작성합니다."
     )
 
-    subject = st.text_input("과목명", placeholder="예: 정보, 수학Ⅰ, 여행지리 …")
+    draft_category = category_for_neis_item(neis_item)
+    st.caption(
+        f"✏️ 작성 항목: **{draft_category}** — 사이드바 'NEIS 항목' 선택을 따릅니다."
+    )
+
+    if draft_category == "세특":
+        subject = st.text_input("과목명", placeholder="예: 정보, 수학Ⅰ, 여행지리 …")
+    else:
+        subject = st.text_input(
+            "활동명 (선택)", placeholder="예) 학급 자치회, 진로 박람회 …"
+        )
 
     performance_text = st.text_area(
         "수행평가 활동 내용 — 무엇을, 어떻게 진행했는지 적어주세요. (일괄 생성 시 모든 학생에게 공통 적용)",
@@ -1394,6 +1453,20 @@ else:
             "- 설문으로 데이터를 수집하고 표로 정리함\n"
             "- 분석 결과를 바탕으로 잔반 줄이기 캠페인 아이디어를 발표함"
         ),
+    )
+
+    observations_text = st.text_area(
+        "교사 관찰 메모 (선택) — 학기 중 기록한 짧은 메모를 한 줄에 하나씩",
+        height=120,
+        placeholder=(
+            "예)\n"
+            "5월 수행평가에서 조원 갈등을 중재하고 역할을 재분배함\n"
+            "몬티홀 문제를 스스로 코드로 검증해 와서 질문함\n"
+            "발표 자료에 출처를 빠짐없이 표기함"
+        ),
+        help="자기평가서가 없어도 관찰 메모만으로 초안을 만들 수 있습니다. "
+        "메모의 사실들이 하나의 서사로 통합됩니다. (단일 초안에만 적용)",
+        key="observations_text",
     )
 
     eval_files = st.file_uploader(
@@ -1533,8 +1606,14 @@ else:
             st.stop()
         if not major.strip() and len(eval_files) <= 1 and not is_eval_table:
             st.warning("⚠️ 사이드바에 학생의 희망 진로/학과를 입력해 주세요. (자기평가서에 장래희망이 있다면 그대로 진행됩니다)")
-        if not performance_text.strip() and not eval_files:
-            st.warning("⚠️ 수행평가 활동 내용을 입력하거나 자기평가서 파일을 업로드해 주세요.")
+        if (
+            not performance_text.strip()
+            and not eval_files
+            and not observations_text.strip()
+        ):
+            st.warning(
+                "⚠️ 수행평가 활동 내용·교사 관찰 메모를 입력하거나 자기평가서 파일을 업로드해 주세요."
+            )
             st.stop()
 
         st.session_state.pop("draft_text", None)
@@ -1587,6 +1666,7 @@ else:
                         target_len,
                         api_key,
                         style_examples=masked_style_examples,
+                        category=draft_category,
                     )
                     return {"name": stem, "draft": remove_mask(draft, mask_map), "error": ""}
                 except Exception as e:
@@ -1601,12 +1681,15 @@ else:
             masked_performance = apply_mask(performance_text, mask_map)
             masked_self_eval = apply_mask(single_eval_text, mask_map)
             masked_style_examples = [apply_mask(x, mask_map) for x in style_examples]
+            masked_observations = apply_mask(observations_text, mask_map)
             # 재생성 시 원자료 맥락 전달용 (마스킹된 상태로 보관)
             draft_context = {
                 "subject": subject.strip(),
                 "performance": masked_performance,
                 "self_eval": masked_self_eval,
                 "style_examples": masked_style_examples,
+                "category": draft_category,
+                "observations": masked_observations,
             }
 
             def _single_draft_job(_idx: int = 0) -> tuple[str, str]:
@@ -1620,6 +1703,8 @@ else:
                             target_len,
                             api_key,
                             style_examples=masked_style_examples,
+                            category=draft_category,
+                            observations=masked_observations,
                         ),
                         "",
                     )
@@ -1742,7 +1827,14 @@ else:
         )
 
         st.divider()
-        render_proofread_block(draft, api_key, mask_map, "proofread_draft")
+        render_proofread_block(
+            draft,
+            api_key,
+            mask_map,
+            "proofread_draft",
+            apply_to_key="draft_text",
+            clear_keys=("quality_draft",),
+        )
 
         st.info(
             "💡 완성된 초안은 **🔍 기재 금지 표현 검토** 모드에 붙여넣으면 "

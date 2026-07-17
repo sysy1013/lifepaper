@@ -4,13 +4,16 @@ import json
 import pytest
 
 from core.gemini import (
+    CATEGORY_GUIDES,
     _gemini_json,
     _gemini_text,
     _strip_code_fence,
     build_draft_prompt,
+    category_for_neis_item,
     quality_avg,
     rewrite_with_gemini,
 )
+from core.rules import NEIS_LIMITS
 
 
 class _Resp:
@@ -115,6 +118,45 @@ def test_build_draft_prompt_self_eval_branches():
     without_eval = build_draft_prompt("수학", "수학과", "수행", "", 400)
     assert "학생 자기평가서 원문" not in without_eval
     assert "학생 자기평가서가 없으므로" in without_eval
+
+
+# ── NEIS 항목 → 작성 카테고리 매핑 ──
+def test_category_for_neis_item_all_keys_resolve():
+    expected = {
+        "과목별 세특 (500자)": "세특",
+        "개인별 세특 (500자)": "세특",
+        "자율·자치활동 (500자)": "자율·자치활동",
+        "동아리활동 (500자)": "동아리활동",
+        "진로활동 (700자)": "진로활동",
+        "행동특성 및 종합의견 (500자)": "행동특성 및 종합의견",
+        "제한 없음": "세특",
+    }
+    for item in NEIS_LIMITS:
+        cat = category_for_neis_item(item)
+        assert cat == expected[item]
+        # 세특 외 카테고리는 작성 원칙이 정의되어 있어야 한다
+        if cat != "세특":
+            assert cat in CATEGORY_GUIDES
+
+
+def test_category_for_neis_item_unknown_defaults_to_세특():
+    assert category_for_neis_item("알 수 없는 항목") == "세특"
+    assert category_for_neis_item("") == "세특"
+
+
+def test_build_draft_prompt_category_injects_guide():
+    p = build_draft_prompt(
+        "무제", "미입력", "수행", "", 500, category="행동특성 및 종합의견"
+    )
+    assert "[작성 항목]" in p
+    assert "행동특성 및 종합의견" in p
+    assert CATEGORY_GUIDES["행동특성 및 종합의견"] in p
+
+
+def test_build_draft_prompt_default_category_omits_guide():
+    p = build_draft_prompt("정보", "컴퓨터공학", "수행", "", 500)
+    assert "[작성 항목]" in p
+    assert "[이 항목의 작성 원칙]" not in p
 
 
 def test_build_draft_prompt_with_style_examples():
