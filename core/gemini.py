@@ -12,8 +12,8 @@ from google.genai import types as genai_types
 from core.masking import apply_mask, remove_mask
 from core.rules import rule_based_filter
 
-GEMINI_MODEL = "gemini-2.5-flash"
-FALLBACK_MODEL = "gemini-flash-lite-latest"  # 주 모델 503 과부하 시 1회 폴백
+GEMINI_MODEL = "gemini-2.5-pro"  # 주 모델 — 품질 우선
+FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-flash-lite-latest")  # 주 모델 과부하 시 순차 폴백
 
 
 # ──────────────────────────────────────────────
@@ -74,13 +74,14 @@ def _gemini_text(model, prompt: str, max_attempts: int = 3) -> str:
             empty = isinstance(e, ValueError) and "빈 응답" in str(e)
             if attempt == max_attempts - 1:
                 if _is_retryable_error(e):
-                    try:
-                        response = model.generate_content(prompt, model_name=FALLBACK_MODEL)
-                        text = (response.text or "").strip()
-                        if text:
-                            return text
-                    except Exception:
-                        pass
+                    for fallback_model in FALLBACK_MODELS:
+                        try:
+                            response = model.generate_content(prompt, model_name=fallback_model)
+                            text = (response.text or "").strip()
+                            if text:
+                                return text
+                        except Exception:
+                            pass
                 raise
             if not (empty or _is_retryable_error(e)):
                 raise

@@ -5,7 +5,7 @@ import pytest
 
 from core.gemini import (
     CATEGORY_GUIDES,
-    FALLBACK_MODEL,
+    FALLBACK_MODELS,
     GEMINI_MODEL,
     _gemini_json,
     _gemini_text,
@@ -54,11 +54,12 @@ def test_gemini_text_retries_on_retryable_then_succeeds():
 
 
 def test_gemini_text_gives_up_after_max_attempts():
-    # 마지막 재시도 실패 후 폴백 1회를 더 시도하지만 그것도 503으로 실패한다 → 총 4회 호출.
+    # 마지막 재시도 실패 후 폴백 체인(2개)을 모두 시도하지만 전부 503으로 실패한다
+    # → 총 3(주 모델) + 2(폴백) = 5회 호출.
     model = _StubModel([Exception("503 unavailable")] * 5)
     with pytest.raises(Exception):
         _gemini_text(model, "p", max_attempts=3)
-    assert model.calls == 4
+    assert model.calls == 5
 
 
 def test_gemini_text_no_retry_on_non_retryable():
@@ -81,7 +82,18 @@ def test_gemini_text_falls_back_after_final_retryable_failure():
     )
     assert _gemini_text(model, "p", max_attempts=3) == "폴백 응답 텍스트"
     assert model.calls == 4
-    assert model.model_names[-1] == FALLBACK_MODEL
+    assert model.model_names[-1] == FALLBACK_MODELS[0]
+
+
+def test_gemini_text_falls_back_to_second_model_when_first_fails():
+    # 첫 번째 폴백(FALLBACK_MODELS[0])도 503으로 실패하면 두 번째 폴백을 시도한다.
+    model = _StubModel(
+        [Exception("503 unavailable")] * 3
+        + [Exception("503 unavailable"), "두 번째 폴백 응답"]
+    )
+    assert _gemini_text(model, "p", max_attempts=3) == "두 번째 폴백 응답"
+    assert model.calls == 5
+    assert model.model_names[-1] == FALLBACK_MODELS[1]
 
 
 def test_gemini_text_no_fallback_on_non_retryable():
@@ -92,11 +104,12 @@ def test_gemini_text_no_fallback_on_non_retryable():
 
 
 def test_gemini_text_fallback_also_fails_raises_original_error():
-    model = _StubModel([Exception("503 unavailable")] * 4)
+    # 주 모델 재시도(3회) + 폴백 체인(2개) 모두 503으로 실패 → 총 5회 호출.
+    model = _StubModel([Exception("503 unavailable")] * (3 + len(FALLBACK_MODELS)))
     with pytest.raises(Exception, match="503"):
         _gemini_text(model, "p", max_attempts=3)
-    assert model.calls == 4
-    assert model.model_names[-1] == FALLBACK_MODEL
+    assert model.calls == 3 + len(FALLBACK_MODELS)
+    assert model.model_names[-1] == FALLBACK_MODELS[-1]
 
 
 # ── _gemini_json ──
