@@ -34,16 +34,18 @@ from core.formatting import (
     highlight_text,
 )
 from core.gemini import (
-    GEMINI_MODEL,
+    MODEL_CHOICES,
     adjust_length_with_gemini,
     assess_quality_with_gemini,
     category_for_neis_item,
     generate_draft_with_gemini,
+    get_active_model,
     proofread_with_gemini,
     quality_avg,
     refine_draft_with_gemini,
     review_text_masked,
     rewrite_with_gemini,
+    set_active_model,
 )
 from core.masking import (
     apply_mask,
@@ -277,7 +279,7 @@ def render_quality_block(text: str, major: str, api_key: str, state_key: str) ->
         if not api_key.strip():
             st.warning("⚠️ 서버에 Gemini API Key가 설정되지 않아 실행할 수 없습니다.")
         else:
-            with st.spinner(f"수석교사 루브릭 평가 중… ({GEMINI_MODEL})"):
+            with st.spinner(f"수석교사 루브릭 평가 중… ({get_active_model()})"):
                 try:
                     st.session_state[state_key] = assess_quality_with_gemini(
                         text, major, api_key
@@ -311,7 +313,7 @@ def render_proofread_block(
         if not api_key.strip():
             st.warning("⚠️ 서버에 Gemini API Key가 설정되지 않아 실행할 수 없습니다.")
         else:
-            with st.spinner(f"오탈자 검사 중… ({GEMINI_MODEL})"):
+            with st.spinner(f"오탈자 검사 중… ({get_active_model()})"):
                 try:
                     items = proofread_with_gemini(apply_mask(text, mask_map), api_key)
                     for it in items:
@@ -424,7 +426,7 @@ def render_length_adjuster(
                 )
             else:
                 char_target = int(target)
-            with st.spinner(f"분량 조절 중… ({GEMINI_MODEL})"):
+            with st.spinner(f"분량 조절 중… ({get_active_model()})"):
                 try:
                     adjusted = adjust_length_with_gemini(
                         apply_mask(text, mask_map), char_target, api_key
@@ -780,6 +782,14 @@ with st.sidebar:
         help="NEIS 바이트 기준은 글자 수 제한을 자→바이트(×3)로 환산해 초과 여부를 판정합니다.",
     ).startswith("NEIS 바이트")
 
+    model_choice = st.selectbox(
+        "AI 모델",
+        list(MODEL_CHOICES.keys()),
+        key="model_choice",
+        help="품질 우선은 정밀하지만 느립니다. 속도 우선은 빠릅니다. 최신 실험은 미리보기 모델로 성능·속도가 좋지만 구글 사정으로 바뀔 수 있습니다.",
+    )
+    set_active_model(MODEL_CHOICES[model_choice])
+
     custom_words_raw = st.text_area(
         "사용자 정의 금칙어 (선택)",
         height=90,
@@ -1027,7 +1037,7 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state.pop("revised_text", None)
             st.session_state.pop("proofread_review", None)
 
-            with st.spinner(f"규칙 기반 필터링 + Gemini 문맥 심사 중… ({GEMINI_MODEL})"):
+            with st.spinner(f"규칙 기반 필터링 + Gemini 문맥 심사 중… ({get_active_model()})"):
                 try:
                     findings = review_text_masked(
                         input_text, major, api_key, custom_words, mask_map
@@ -1061,7 +1071,7 @@ if mode == "🔍 기재 금지 표현 검토":
         if findings:
             st.subheader("4️⃣ 수정본 자동 생성")
             if st.button("✏️ 검토 결과를 반영한 수정본 생성", use_container_width=True):
-                with st.spinner(f"수정본 생성 중… ({GEMINI_MODEL})"):
+                with st.spinner(f"수정본 생성 중… ({get_active_model()})"):
                     try:
                         masked_findings = [
                             {**f, "word": apply_mask(f["word"], mask_map)}
@@ -1109,7 +1119,7 @@ if mode == "🔍 기재 금지 표현 검토":
                 if col_re.button(
                     "🔁 이 수정본 다시 검토", use_container_width=True
                 ):
-                    with st.spinner(f"수정본 재검토 중… ({GEMINI_MODEL})"):
+                    with st.spinner(f"수정본 재검토 중… ({get_active_model()})"):
                         try:
                             new_findings = review_text_masked(
                                 revised, major, api_key, custom_words, mask_map
@@ -1726,7 +1736,7 @@ else:
                     st.session_state["draft_variants"] = variants
                     st.session_state["draft_context"] = draft_context
             else:
-                with st.spinner(f"세특 초안 생성 중… ({GEMINI_MODEL})"):
+                with st.spinner(f"세특 초안 생성 중… ({get_active_model()})"):
                     draft, err = _single_draft_job()
                     if err:
                         st.error(f"❌ Gemini API 호출 실패: {err}")
@@ -1802,7 +1812,7 @@ else:
             if not feedback.strip():
                 st.warning("⚠️ 반영할 피드백을 먼저 입력해 주세요.")
             else:
-                with st.spinner(f"피드백 반영 재생성 중… ({GEMINI_MODEL})"):
+                with st.spinner(f"피드백 반영 재생성 중… ({get_active_model()})"):
                     try:
                         refined = refine_draft_with_gemini(
                             apply_mask(draft, mask_map),

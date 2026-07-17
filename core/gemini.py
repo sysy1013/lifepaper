@@ -12,8 +12,29 @@ from google.genai import types as genai_types
 from core.masking import apply_mask, remove_mask
 from core.rules import rule_based_filter
 
-GEMINI_MODEL = "gemini-2.5-pro"  # 주 모델 — 품질 우선
-FALLBACK_MODELS = ("gemini-2.5-flash", "gemini-flash-lite-latest")  # 주 모델 과부하 시 순차 폴백
+MODEL_CHOICES = {
+    "품질 우선 (2.5 Pro — 정밀·느림)": "gemini-2.5-pro",
+    "속도 우선 (2.5 Flash — 빠름)": "gemini-2.5-flash",
+    "최신 실험 (3.0 Flash Preview — 빠르고 우수, 변경 가능성)": "gemini-3-flash-preview",
+}
+DEFAULT_MODEL = "gemini-2.5-pro"
+_FALLBACK_ORDER = ("gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-pro")
+
+_active_model = DEFAULT_MODEL
+
+
+def set_active_model(name: str) -> None:
+    global _active_model
+    _active_model = name
+
+
+def get_active_model() -> str:
+    return _active_model
+
+
+def get_fallback_models() -> tuple[str, ...]:
+    """활성 모델을 제외한 폴백 순서."""
+    return tuple(m for m in _FALLBACK_ORDER if m != get_active_model())
 
 
 # ──────────────────────────────────────────────
@@ -30,7 +51,7 @@ class _GeminiModel:
 
     def generate_content(self, prompt: str, model_name: str | None = None):
         return self._client.models.generate_content(
-            model=model_name or GEMINI_MODEL, contents=prompt, config=self._config
+            model=model_name or get_active_model(), contents=prompt, config=self._config
         )
 
 
@@ -74,7 +95,7 @@ def _gemini_text(model, prompt: str, max_attempts: int = 3) -> str:
             empty = isinstance(e, ValueError) and "빈 응답" in str(e)
             if attempt == max_attempts - 1:
                 if _is_retryable_error(e):
-                    for fallback_model in FALLBACK_MODELS:
+                    for fallback_model in get_fallback_models():
                         try:
                             response = model.generate_content(prompt, model_name=fallback_model)
                             text = (response.text or "").strip()
