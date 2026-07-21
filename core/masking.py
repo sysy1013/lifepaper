@@ -195,3 +195,18 @@ def extend_mask_map(
     ]
     extended.sort(key=lambda pair: len(pair[0]), reverse=True)
     return extended, detected
+
+
+def remove_mask_deep(obj, mask_map: list[tuple[str, str]]):
+    """중첩 구조(dict/list) 안의 모든 문자열에서 마스킹 토큰을 원래 단어로 되돌린다.
+
+    품질 진단처럼 응답이 자유 서술 JSON이라 모델이 마스킹 토큰을 그대로 인용할 수
+    있는 경우에 쓴다. 원본 구조는 바꾸지 않고 새 객체를 반환한다.
+    """
+    if isinstance(obj, str):
+        return remove_mask(obj, mask_map)
+    if isinstance(obj, dict):
+        return {k: remove_mask_deep(v, mask_map) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [remove_mask_deep(v, mask_map) for v in obj]
+    return obj

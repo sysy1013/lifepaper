@@ -52,6 +52,7 @@ from core.masking import (
     build_mask_map,
     extend_mask_map,
     remove_mask,
+    remove_mask_deep,
     suggest_mask_candidates,
 )
 from core.parsing import (
@@ -275,8 +276,18 @@ def render_quality_compact(q: dict) -> None:
         st.markdown("개선 제안: " + " / ".join(str(i) for i in improvements))
 
 
-def render_quality_block(text: str, major: str, api_key: str, state_key: str) -> None:
-    """품질 진단 실행 버튼 + 결과 표시 블록."""
+def render_quality_block(
+    text: str,
+    major: str,
+    api_key: str,
+    state_key: str,
+    mask_map: list[tuple[str, str]] | None = None,
+) -> None:
+    """품질 진단 실행 버튼 + 결과 표시 블록.
+
+    text는 이미 마스킹된 상태로 받는다. 루브릭 코멘트가 마스킹 토큰을 인용할 수
+    있으므로 mask_map이 주어지면 결과 전체를 원래 표현으로 복원해 보여준다.
+    """
     st.subheader("🏅 세특 품질 진단 (수석교사 루브릭)")
     st.caption("구체성 · 개별성 · 탐구 과정 · 성장·변화 · 진로 연계 5개 기준으로 평가합니다.")
     if st.button("품질 진단 실행", key=f"btn_{state_key}", use_container_width=True):
@@ -285,8 +296,9 @@ def render_quality_block(text: str, major: str, api_key: str, state_key: str) ->
         else:
             with st.spinner(f"수석교사 루브릭 평가 중… ({get_active_model()})"):
                 try:
-                    st.session_state[state_key] = assess_quality_with_gemini(
-                        text, major, api_key
+                    result = assess_quality_with_gemini(text, major, api_key)
+                    st.session_state[state_key] = remove_mask_deep(
+                        result, mask_map or []
                     )
                 except Exception as e:
                     st.error(f"❌ 품질 진단 실패: {e}")
@@ -943,12 +955,21 @@ if mode == "🔍 기재 금지 표현 검토":
     roster_text_col = None
 
     if input_method.startswith("파일 업로드"):
+        st.markdown(
+            "**검토할 생기부를 올려주세요. 두 가지 방법 중 하나를 쓰면 됩니다.**\n\n"
+            "- **방법 1 — 학생마다 파일 하나** (한글·워드·PDF·텍스트): "
+            "학생 1명이면 1개, 반 전체면 여러 개를 한 번에 선택하세요. "
+            "파일명에 이름이나 번호를 넣어두면 결과를 구분하기 쉽습니다.\n"
+            "- **방법 2 — 반 전체가 한 표에 든 엑셀/CSV 1개**: "
+            "한 줄에 학생 한 명씩, 이름 칸과 생기부 내용 칸이 있는 표를 올리세요. "
+            "이 방법은 표 파일 **1개만** 올려야 하며 다른 파일과 섞을 수 없습니다."
+        )
         review_files = st.file_uploader(
-            "생기부 파일 또는 반 전체 명렬표(.csv/.xlsx)를 업로드하세요. "
-            "여러 개 올리면 반 전체 일괄 검토가 됩니다. 명렬표는 한 개만 단독으로 올려주세요.",
+            "파일 선택",
             type=["txt", "hwp", "hwpx", "docx", "pdf", "csv", "xlsx"],
             accept_multiple_files=True,
             key="review_files",
+            label_visibility="collapsed",
         )
         spreadsheet_files = [
             f for f in review_files if f.name.lower().endswith((".csv", ".xlsx"))
@@ -1187,7 +1208,11 @@ if mode == "🔍 기재 금지 표현 검토":
 
         st.divider()
         render_quality_block(
-            apply_mask(review["text"], rev_map), major, api_key, "quality_review"
+            apply_mask(review["text"], rev_map),
+            major,
+            api_key,
+            "quality_review",
+            mask_map=rev_map,
         )
 
         st.divider()
@@ -1333,8 +1358,11 @@ if mode == "🔍 기재 금지 표현 검토":
                 b = ok[idx]
                 try:
                     return (
-                        assess_quality_with_gemini(
-                            apply_mask(b["text"], bpost_map), major, api_key
+                        remove_mask_deep(
+                            assess_quality_with_gemini(
+                                apply_mask(b["text"], bpost_map), major, api_key
+                            ),
+                            bpost_map,
                         ),
                         "",
                     )
@@ -1902,7 +1930,11 @@ else:
 
         st.divider()
         render_quality_block(
-            apply_mask(draft, draft_map), major, api_key, "quality_draft"
+            apply_mask(draft, draft_map),
+            major,
+            api_key,
+            "quality_draft",
+            mask_map=draft_map,
         )
 
         st.divider()
@@ -1943,8 +1975,11 @@ else:
                 b = ok[idx]
                 try:
                     return (
-                        assess_quality_with_gemini(
-                            apply_mask(b["draft"], dpost_map), major, api_key
+                        remove_mask_deep(
+                            assess_quality_with_gemini(
+                                apply_mask(b["draft"], dpost_map), major, api_key
+                            ),
+                            dpost_map,
                         ),
                         "",
                     )

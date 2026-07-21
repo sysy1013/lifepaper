@@ -191,3 +191,26 @@ def test_extend_mask_map_roundtrip_with_particle_name():
     masked = apply_mask(text, extended)
     assert "김철수" not in masked
     assert remove_mask(masked, extended) == text
+
+
+def test_remove_mask_deep_restores_nested_quality_result():
+    """품질 진단처럼 중첩된 응답 안의 마스킹 토큰도 모두 복원한다."""
+    from core.masking import remove_mask_deep
+
+    m = build_mask_map(["이영희"])
+    q = {
+        "scores": [{"criterion": "구체성", "score": 4, "comment": "《비공개1》의 탐구가 구체적임"}],
+        "overall": "《비공개1》 학생은 우수함",
+        "improvements": ["《비공개1》의 성장 서술 보완"],
+    }
+    out = remove_mask_deep(q, m)
+    assert "비공개" not in str(out)
+    assert out["scores"][0]["comment"] == "이영희의 탐구가 구체적임"
+    assert out["scores"][0]["score"] == 4  # 비문자열 값은 그대로
+
+
+def test_remove_mask_deep_passthrough_for_non_strings():
+    from core.masking import remove_mask_deep
+
+    assert remove_mask_deep(5, build_mask_map(["a"])) == 5
+    assert remove_mask_deep(None, []) is None
