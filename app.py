@@ -713,7 +713,6 @@ def render_feedback() -> None:
     """
     if st.session_state.pop("fb_clear", False):
         st.session_state.pop("fb_body", None)
-        st.session_state.pop("fb_contact", None)
 
     st.subheader("💬 건의사항 보내기")
     st.caption("기능 제안·버그 신고를 보내면 개선에 반영됩니다.")
@@ -736,11 +735,6 @@ def render_feedback() -> None:
         key="fb_body",
         placeholder="어떤 상황에서 무엇이 불편했는지 구체적으로 적어주세요.",
     )
-    contact = st.text_input(
-        "답변받을 연락처 (선택)",
-        key="fb_contact",
-        placeholder="이메일 주소 등 — 비워도 됩니다.",
-    )
 
     if not st.button("보내기", type="primary", key="fb_submit"):
         return
@@ -750,18 +744,15 @@ def render_feedback() -> None:
         return
 
     # 전송 직전 개인정보 자동 마스킹 (건의 내용에도 학생 정보가 섞일 수 있다)
-    safe_map, auto_words = extend_mask_map(
-        [body, contact or ""], build_mask_map([]), True
-    )
+    safe_map, auto_words = extend_mask_map([body], build_mask_map([]), True)
     safe_body = apply_mask(body, safe_map)
-    safe_contact = apply_mask(contact or "", safe_map)
 
     if is_configured(st.secrets):
         try:
-            send_feedback_email(kind, safe_body, safe_contact, st.secrets)
+            send_feedback_email(kind, safe_body, st.secrets)
         except Exception as e:
             st.error(f"전송 실패: {e}")
-            _render_feedback_fallback(kind, safe_body, safe_contact)
+            _render_feedback_fallback(kind, safe_body)
             return
         # 성공 — 내용을 세션에서 지우고 다음 실행에서 안내를 표시한다.
         st.session_state["fb_clear"] = True
@@ -769,14 +760,14 @@ def render_feedback() -> None:
         st.rerun()
     else:
         st.info("현재 이메일 전송이 설정되어 있지 않습니다. 아래 내용을 복사해 보내주세요.")
-        _render_feedback_fallback(kind, safe_body, safe_contact)
+        _render_feedback_fallback(kind, safe_body)
         if auto_words:
             st.caption("🛡️ 자동 마스킹 적용: " + ", ".join(auto_words))
 
 
-def _render_feedback_fallback(kind: str, body: str, contact: str) -> None:
+def _render_feedback_fallback(kind: str, body: str) -> None:
     """이메일 전송이 불가할 때, 교사가 쓴 내용을 복사할 수 있도록 그대로 보여준다."""
-    _, message = build_feedback_message(kind, body, contact)
+    _, message = build_feedback_message(kind, body)
     st.code(message)
 
 

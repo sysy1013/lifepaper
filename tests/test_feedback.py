@@ -50,19 +50,17 @@ def test_is_configured_false_for_empty_secrets():
 
 # ── build_feedback_message ──
 def test_build_feedback_message_title_and_body():
-    subject, body = build_feedback_message(
-        "버그 신고", "일괄 검토에서 오류가 납니다.", "teacher@example.com"
-    )
+    subject, body = build_feedback_message("버그 신고", "일괄 검토에서 오류가 납니다.")
     assert subject == "[생기부 도우미] 버그 신고"
     assert "버그 신고" in body
-    assert "teacher@example.com" in body
     assert "일괄 검토에서 오류가 납니다." in body
     assert "작성 시각" in body
 
 
-def test_build_feedback_message_empty_contact_placeholder():
-    _, body = build_feedback_message("기능 제안", "이런 기능이 있으면 좋겠습니다.")
-    assert "미기재" in body
+def test_build_feedback_message_defaults_kind_when_blank():
+    subject, body = build_feedback_message("  ", "이런 기능이 있으면 좋겠습니다.")
+    assert subject == "[생기부 도우미] 기타"
+    assert "유형: 기타" in body
 
 
 def test_build_feedback_message_iso_timestamp():
@@ -108,9 +106,7 @@ def fake_smtp(monkeypatch):
 
 
 def test_send_feedback_email_sends_expected_message(fake_smtp):
-    send_feedback_email(
-        "버그 신고", "여기서 오류가 발생합니다.", "teacher@example.com", FULL_SECRETS
-    )
+    send_feedback_email("버그 신고", "여기서 오류가 발생합니다.", FULL_SECRETS)
 
     assert len(fake_smtp.instances) == 1
     server = fake_smtp.instances[0]
@@ -128,7 +124,7 @@ def test_send_feedback_email_sends_expected_message(fake_smtp):
 
 def test_send_feedback_email_defaults_port_465(fake_smtp):
     secrets = {k: v for k, v in FULL_SECRETS.items() if k != "SMTP_PORT"}
-    send_feedback_email("기타", "내용입니다.", "", secrets)
+    send_feedback_email("기타", "내용입니다.", secrets)
     assert fake_smtp.instances[0].port == 465
 
 
@@ -138,4 +134,62 @@ def test_send_feedback_email_propagates_errors(monkeypatch):
 
     monkeypatch.setattr(smtplib, "SMTP_SSL", boom)
     with pytest.raises(smtplib.SMTPAuthenticationError):
-        send_feedback_email("기타", "내용입니다.", "", FULL_SECRETS)
+        send_feedback_email("기타", "내용입니다.", FULL_SECRETS)
+
+
+# ── feedback_recipient (기본 수신 주소) ──
+def test_feedback_recipient_defaults_when_unset():
+    """secrets에 FEEDBACK_TO가 없으면 기본 주소로 보낸다."""
+    from core.feedback import DEFAULT_FEEDBACK_TO, feedback_recipient
+
+    assert feedback_recipient({}) == DEFAULT_FEEDBACK_TO
+    assert feedback_recipient({"FEEDBACK_TO": "   "}) == DEFAULT_FEEDBACK_TO
+
+
+def test_feedback_recipient_secret_overrides_default():
+    from core.feedback import feedback_recipient
+
+    assert feedback_recipient({"FEEDBACK_TO": "other@example.com"}) == "other@example.com"
+
+
+def test_is_configured_needs_only_smtp_credentials():
+    """수신 주소는 기본값이 있으므로 SMTP 자격정보만 있으면 전송 가능하다."""
+    from core.feedback import is_configured
+
+    assert is_configured(
+        {"SMTP_HOST": "smtp.x", "SMTP_USER": "u@x", "SMTP_PASSWORD": "p"}
+    ) is True
+
+
+def test_send_uses_default_recipient(monkeypatch):
+    """FEEDBACK_TO 미설정 시 기본 주소가 To 헤더에 들어간다."""
+    import smtplib
+
+    from core.feedback import DEFAULT_FEEDBACK_TO, send_feedback_email
+
+    sent = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port):
+            sent["host"], sent["port"] = host, port
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def login(self, u, p):
+            sent["login"] = (u, p)
+
+        def send_message(self, msg):
+            sent["msg"] = msg
+
+    monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTP)
+    send_feedback_email(
+        "기능 제안",
+        "일괄 처리 속도를 올려주세요",
+        {"SMTP_HOST": "smtp.x", "SMTP_USER": "u@x", "SMTP_PASSWORD": "p"},
+    )
+    assert sent["msg"]["To"] == DEFAULT_FEEDBACK_TO
+    assert sent["login"] == ("u@x", "p")
