@@ -46,6 +46,7 @@ from core.gemini import (
     review_text_masked,
     rewrite_with_gemini,
     set_active_model,
+    summarize_activity_with_gemini,
 )
 from core.masking import (
     apply_mask,
@@ -1506,6 +1507,80 @@ else:
             "활동명 (선택)", placeholder="예) 학급 자치회, 진로 박람회 …"
         )
 
+    def insert_activity_summary() -> None:
+        """요약을 '수행평가 활동 내용' 입력란에 넣는다 (기존 내용이 있으면 아래에 덧붙임).
+
+        on_click 콜백은 위젯 생성 전에 실행되므로 위젯 key에 직접 대입할 수 있다.
+        """
+        summary = (st.session_state.get("activity_summary") or "").strip()
+        if not summary:
+            return
+        current = (st.session_state.get("performance_text") or "").strip()
+        st.session_state["performance_text"] = (
+            f"{current}\n\n{summary}" if current else summary
+        )
+
+    with st.expander("📄 수행평가 자료에서 요약 가져오기 (선택)", expanded=False):
+        st.caption(
+            "학생이 낸 수행평가 결과물(PDF·한글·워드 등)을 올리면, 학생이 무엇을 했는지 "
+            "요약해 드립니다. 요약을 아래 '수행평가 활동 내용' 칸에 바로 넣을 수 있습니다."
+        )
+        activity_file = st.file_uploader(
+            "수행평가 자료 파일",
+            type=["pdf", "hwp", "hwpx", "docx", "txt"],
+            key="activity_file",
+        )
+        if st.button(
+            "요약 만들기",
+            key="activity_summarize",
+            disabled=activity_file is None,
+            use_container_width=True,
+        ):
+            if not api_key.strip():
+                st.warning("⚠️ 서버에 Gemini API Key가 설정되지 않아 실행할 수 없습니다.")
+            else:
+                activity_raw = ""
+                try:
+                    activity_raw = read_uploaded_file(activity_file)
+                except Exception as e:
+                    st.warning(
+                        f"⚠️ 파일에서 읽을 수 있는 텍스트를 찾지 못했습니다: {e} "
+                        "(스캔한 이미지 PDF는 텍스트가 없어 요약할 수 없습니다. "
+                        "내용을 아래 칸에 직접 붙여넣어 주세요.)"
+                    )
+                if activity_raw and len(activity_raw.strip()) < 30:
+                    st.warning(
+                        "⚠️ 파일에서 읽을 수 있는 텍스트가 거의 없습니다. "
+                        "스캔한 이미지 PDF는 텍스트가 없어 요약할 수 없습니다. "
+                        "내용을 아래 칸에 직접 붙여넣어 주세요."
+                    )
+                elif activity_raw:
+                    try:
+                        act_map, act_auto = masked_ctx([activity_raw, subject])
+                        with st.spinner("수행평가 자료를 요약하는 중입니다…"):
+                            summary = summarize_activity_with_gemini(
+                                apply_mask(activity_raw, act_map),
+                                api_key,
+                                apply_mask(subject, act_map),
+                            )
+                        st.session_state["activity_summary"] = remove_mask(
+                            summary, act_map
+                        )
+                        st.session_state["activity_summary_auto"] = act_auto
+                    except Exception as e:
+                        st.error(f"❌ 요약을 만들지 못했습니다: {e}")
+
+        if st.session_state.get("activity_summary"):
+            render_auto_mask_note(st.session_state.get("activity_summary_auto") or [])
+            st.code(st.session_state["activity_summary"], language=None)
+            st.button(
+                "⬇️ 이 요약을 아래 활동 내용 칸에 넣기",
+                key="activity_summary_insert",
+                type="primary",
+                use_container_width=True,
+                on_click=insert_activity_summary,
+            )
+
     performance_text = st.text_area(
         "수행평가 활동 내용 — 무엇을, 어떻게 진행했는지 적어주세요. (일괄 생성 시 모든 학생에게 공통 적용)",
         height=180,
@@ -1514,6 +1589,7 @@ else:
             "- 설문으로 데이터를 수집하고 표로 정리함\n"
             "- 분석 결과를 바탕으로 잔반 줄이기 캠페인 아이디어를 발표함"
         ),
+        key="performance_text",
     )
 
     observations_text = st.text_area(

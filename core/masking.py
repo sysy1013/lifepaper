@@ -12,7 +12,21 @@ _NAME_STOPWORDS = {
     "김치", "이해", "이상", "이후", "이내", "이번", "박수", "정도", "정리",
     "조사", "주제", "안내", "문제", "문장", "성적", "성장", "신청", "권장",
     "장점", "고민", "최고", "최선",
+    "전체", "전원", "전반", "최종", "최대", "최소", "안전", "조원", "주변",
+    "작성", "성실", "성취", "구성", "구분", "고려", "남은", "심화",
 }
+
+# 이름 뒤에 붙을 수 있는 조사 (오탐 판별용 — 떼어낸 형태가 흔한 명사면 이름이 아니다)
+_JOSA_TAIL = ("은", "는", "이", "가", "을", "를", "의", "와", "과", "도", "만", "에", "서", "로")
+
+
+def _looks_like_common_word(token: str) -> bool:
+    """'전체가', '정리를'처럼 조사가 붙은 일반 명사인지 판정한다."""
+    if token in _NAME_STOPWORDS:
+        return True
+    if len(token) >= 3 and token[-1] in _JOSA_TAIL and token[:-1] in _NAME_STOPWORDS:
+        return True
+    return False
 
 # 성씨 + 1~2글자, 한글 경계로 둘러싸인 독립 단어
 _NAME_PATTERN = re.compile(rf"(?<![가-힣])[{_SURNAMES}][가-힣]{{1,2}}(?![가-힣])")
@@ -27,6 +41,14 @@ _NAME_TITLE_PATTERN = re.compile(
 _NAME_PARTICLE_PATTERN = re.compile(
     rf"(?<![가-힣])([{_SURNAMES}][가-힣]{{1,2}})"
     r"(?=(?:은|는|이|가|을|를|의|와|과|도|만|께|에게|이나|나)(?![가-힣]))"
+)
+# "이름: 이영희", "제출자 이영희"처럼 이름임이 분명한 문맥 (1회만 나와도 인정)
+_NAME_LABEL_PATTERN = re.compile(
+    rf"(?:이름|성명|학생명|제출자|작성자)\s*[:：]?\s*([{_SURNAMES}][가-힣]{{1,2}})(?![가-힣])"
+)
+# "3학년 2반 이영희", "2반 15번 이영희"처럼 학반·번호 뒤에 오는 이름 (1회만 나와도 인정)
+_NAME_CLASS_PATTERN = re.compile(
+    rf"\d+\s*반\s*(?:\d+\s*번)?\s*([{_SURNAMES}][가-힣]{{1,2}})(?![가-힣])"
 )
 # 5자리 학번
 _STUDENT_NO_PATTERN = re.compile(r"\b\d{5}\b")
@@ -157,6 +179,12 @@ def detect_pii(texts: list[str], existing: list[str] | None = None) -> list[str]
         for m in _NAME_TITLE_PATTERN.findall(text):
             if m not in _NAME_STOPWORDS:
                 suffix_names.add(m)
+        # 이름표('이름: OOO')·학반 표기('3학년 2반 OOO')는 1회만 나와도 이름으로 본다.
+        # 수행평가 제출물은 표지에 이름이 한 번만 적히는 경우가 많다.
+        for pattern in (_NAME_LABEL_PATTERN, _NAME_CLASS_PATTERN):
+            for m in pattern.findall(text):
+                if not _looks_like_common_word(m):
+                    suffix_names.add(m)
         for pattern in (
             _STUDENT_NO_PATTERN,
             _PHONE_PATTERN,
