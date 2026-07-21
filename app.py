@@ -26,6 +26,11 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+from core.feedback import (
+    build_feedback_message,
+    is_configured,
+    send_feedback_email,
+)
 from core.formatting import (
     build_batch_workbook,
     build_neis_workbook,
@@ -680,11 +685,99 @@ def render_guide() -> None:
             "서로 다른 두 버전을 나란히 보고 마음에 드는 쪽을 고르고 싶을 때 사용하세요."
         )
 
-    # ── (e) 안전 고지 ──
+    # ── (e) 건의사항 안내 ──
+    st.info(
+        "💬 개선 아이디어나 오류를 발견하셨다면 위쪽 모드 선택에서 **💬 건의사항** 탭을 "
+        "골라 보내주세요. 보내주신 내용은 앱에 저장되지 않고 운영자에게 바로 전달됩니다."
+    )
+
+    # ── (f) 안전 고지 ──
     st.warning(
         "⚠️ 본 도구의 결과는 **참고용 초안/심사**입니다. 최종 기재 내용은 반드시 "
         "당해 연도 교육부 「학교생활기록부 기재요령」 원문을 확인한 뒤 **교사가 직접 작성·확정**하시기 바랍니다."
     )
+
+
+# ──────────────────────────────────────────────
+# 건의사항 (운영자 이메일로 바로 전송, 앱에는 저장하지 않음)
+# ──────────────────────────────────────────────
+FEEDBACK_KINDS = ["기능 제안", "버그 신고", "사용 중 불편", "기타"]
+
+
+def render_feedback() -> None:
+    """기능 제안·버그 신고를 운영자 메일로 보내는 화면.
+
+    위젯 key는 위젯이 만들어진 뒤에는 수정할 수 없으므로, 전송에 성공하면
+    fb_clear 플래그만 세우고 rerun 한다. 다음 실행의 이 지점(위젯 생성 전)에서
+    입력 key를 지우므로 건의 내용은 세션에 남지 않는다.
+    """
+    if st.session_state.pop("fb_clear", False):
+        st.session_state.pop("fb_body", None)
+        st.session_state.pop("fb_contact", None)
+
+    st.subheader("💬 건의사항 보내기")
+    st.caption("기능 제안·버그 신고를 보내면 개선에 반영됩니다.")
+    st.warning(
+        "⚠️ 학생 이름·학번 등 개인정보는 적지 마세요. 보내기 전에 자동으로 가려지지만, "
+        "처음부터 넣지 않는 것이 가장 안전합니다."
+    )
+
+    # 직전 실행에서 전송에 성공했다면 결과를 알린 뒤 입력란은 비워 둔다.
+    done = st.session_state.pop("fb_done", None)
+    if done is not None:
+        st.success("보내주셔서 감사합니다. 검토 후 반영하겠습니다.")
+        if done:
+            st.caption("🛡️ 자동 마스킹 적용: " + ", ".join(done))
+
+    kind = st.selectbox("유형", FEEDBACK_KINDS, key="fb_kind")
+    body = st.text_area(
+        "내용",
+        height=180,
+        key="fb_body",
+        placeholder="어떤 상황에서 무엇이 불편했는지 구체적으로 적어주세요.",
+    )
+    contact = st.text_input(
+        "답변받을 연락처 (선택)",
+        key="fb_contact",
+        placeholder="이메일 주소 등 — 비워도 됩니다.",
+    )
+
+    if not st.button("보내기", type="primary", key="fb_submit"):
+        return
+
+    if len((body or "").strip()) < 10:
+        st.warning("내용을 10자 이상 적어주세요.")
+        return
+
+    # 전송 직전 개인정보 자동 마스킹 (건의 내용에도 학생 정보가 섞일 수 있다)
+    safe_map, auto_words = extend_mask_map(
+        [body, contact or ""], build_mask_map([]), True
+    )
+    safe_body = apply_mask(body, safe_map)
+    safe_contact = apply_mask(contact or "", safe_map)
+
+    if is_configured(st.secrets):
+        try:
+            send_feedback_email(kind, safe_body, safe_contact, st.secrets)
+        except Exception as e:
+            st.error(f"전송 실패: {e}")
+            _render_feedback_fallback(kind, safe_body, safe_contact)
+            return
+        # 성공 — 내용을 세션에서 지우고 다음 실행에서 안내를 표시한다.
+        st.session_state["fb_clear"] = True
+        st.session_state["fb_done"] = auto_words
+        st.rerun()
+    else:
+        st.info("현재 이메일 전송이 설정되어 있지 않습니다. 아래 내용을 복사해 보내주세요.")
+        _render_feedback_fallback(kind, safe_body, safe_contact)
+        if auto_words:
+            st.caption("🛡️ 자동 마스킹 적용: " + ", ".join(auto_words))
+
+
+def _render_feedback_fallback(kind: str, body: str, contact: str) -> None:
+    """이메일 전송이 불가할 때, 교사가 쓴 내용을 복사할 수 있도록 그대로 보여준다."""
+    _, message = build_feedback_message(kind, body, contact)
+    st.code(message)
 
 
 # ──────────────────────────────────────────────
@@ -894,7 +987,7 @@ def render_auto_mask_note(auto_words: list[str]) -> None:
 # ── 모드 선택 ──
 mode = st.radio(
     "모드를 선택하세요.",
-    ["🔍 기재 금지 표현 검토", "✍️ 세특 초안 작성", "📖 사용 안내"],
+    ["🔍 기재 금지 표현 검토", "✍️ 세특 초안 작성", "📖 사용 안내", "💬 건의사항"],
     horizontal=True,
 )
 
@@ -1481,6 +1574,12 @@ if mode == "🔍 기재 금지 표현 검토":
 # ══════════════════════════════════════════════
 elif mode == "📖 사용 안내":
     render_guide()
+
+# ══════════════════════════════════════════════
+# 건의사항
+# ══════════════════════════════════════════════
+elif mode == "💬 건의사항":
+    render_feedback()
 
 # ══════════════════════════════════════════════
 # 모드 2: 세특 초안 작성
