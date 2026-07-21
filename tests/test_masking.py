@@ -2,6 +2,8 @@
 from core.masking import (
     apply_mask,
     build_mask_map,
+    detect_pii,
+    extend_mask_map,
     remove_mask,
     suggest_mask_candidates,
 )
@@ -76,3 +78,116 @@ def test_suggest_single_occurrence_name_followed_by_student_is_suggested():
     result = suggest_mask_candidates(texts)
     assert "김철수" in result
     assert "이영희" in result
+
+
+# ── detect_pii (자동 마스킹 탐지) ──
+def test_detect_pii_repeated_name():
+    # "학생"이 뒤따르지 않아도 2회 이상 독립 단어로 등장하면 탐지한다.
+    texts = ["김철수 성실함.", "발표에서 김철수 탐구 과정을 설명함."]
+    assert "김철수" in detect_pii(texts)
+
+
+def test_detect_pii_name_with_student_suffix_once():
+    assert "김철수" in detect_pii(["김철수 학생이 발표를 진행함."])
+
+
+def test_detect_pii_student_number():
+    assert "20301" in detect_pii(["학번 20301 학생의 활동 기록"])
+
+
+def test_detect_pii_phone_number():
+    assert "010-1234-5678" in detect_pii(["연락처는 010-1234-5678 입니다."])
+
+
+def test_detect_pii_rrn():
+    assert "010101-3234567" in detect_pii(["주민등록번호 010101-3234567 확인"])
+
+
+def test_detect_pii_email():
+    assert "student@example.com" in detect_pii(["메일 student@example.com 로 제출함."])
+
+
+def test_detect_pii_excludes_stopword():
+    assert "이해" not in detect_pii(["내용을 이해함.", "깊이 이해함."])
+
+
+def test_detect_pii_excludes_existing():
+    texts = ["김철수 학생.", "김철수 발표함."]
+    assert "김철수" not in detect_pii(texts, existing=["김철수"])
+
+
+def test_detect_pii_returns_longest_first():
+    texts = ["김철수 학생(20301)의 연락처는 010-1234-5678 이다."]
+    result = detect_pii(texts)
+    assert len(result) >= 3
+    assert [len(w) for w in result] == sorted((len(w) for w in result), reverse=True)
+
+
+# ── extend_mask_map ──
+def test_extend_mask_map_disabled_returns_base_unchanged():
+    base = build_mask_map(["홍길동"])
+    extended, added = extend_mask_map(["김철수 학생"], base, enabled=False)
+    assert extended is base
+    assert added == []
+
+
+def test_extend_mask_map_adds_non_colliding_tokens():
+    base = build_mask_map(["홍길동"])
+    extended, added = extend_mask_map(["김철수 학생이 발표함."], base)
+    assert "김철수" in added
+    tokens = [t for _, t in extended]
+    assert len(tokens) == len(set(tokens))  # 토큰 충돌 없음
+    assert "《비공개1》" in tokens and "《비공개2》" in tokens
+    assert ("홍길동", "《비공개1》") in extended
+
+
+def test_extend_mask_map_keeps_longest_first():
+    base = build_mask_map(["홍"])
+    extended, _ = extend_mask_map(["김철수 학생(20301) 기록"], base)
+    lengths = [len(w) for w, _ in extended]
+    assert lengths == sorted(lengths, reverse=True)
+
+
+def test_extend_mask_map_roundtrip_with_manual_and_auto_words():
+    base = build_mask_map(["홍길동"])
+    text = "홍길동 담당. 김철수 학생(20301)은 성실함."
+    extended, added = extend_mask_map([text], base)
+    masked = apply_mask(text, extended)
+    assert "홍길동" not in masked
+    assert "김철수" not in masked
+    assert "20301" not in masked
+    assert remove_mask(masked, extended) == text
+    assert "김철수" in added and "20301" in added
+
+
+def test_extend_mask_map_no_detection_returns_base():
+    base = build_mask_map(["홍길동"])
+    extended, added = extend_mask_map(["특이사항 없음."], base)
+    assert added == []
+    assert extended == base
+
+
+def test_detect_pii_name_with_attached_particles():
+    """조사가 붙은 이름(김철수는/김철수가)도 같은 이름의 출현으로 세어 탐지한다."""
+    assert "김철수" in detect_pii(["김철수는 탐구함. 김철수가 발표함."])
+
+
+def test_detect_pii_particle_name_single_occurrence_not_detected():
+    """조사가 붙었더라도 1회만 등장하면 보수적으로 탐지하지 않는다."""
+    assert detect_pii(["이영희는 발표함."]) == []
+
+
+def test_detect_pii_particle_form_does_not_flag_common_words():
+    """조사가 붙은 일반 명사(이해는/박수를)는 불용어로 걸러 오탐하지 않는다."""
+    assert detect_pii(["이해는 중요함. 이해가 필요함. 박수를 침. 박수가 나옴."]) == []
+
+
+def test_extend_mask_map_roundtrip_with_particle_name():
+    """조사 붙은 이름을 자동 마스킹해도 원문이 정확히 복원된다."""
+    base = build_mask_map(["홍길동"])
+    text = "홍길동과 김철수는 발표함. 김철수가 정리함."
+    extended, added = extend_mask_map([text], base)
+    assert "김철수" in added
+    masked = apply_mask(text, extended)
+    assert "김철수" not in masked
+    assert remove_mask(masked, extended) == text

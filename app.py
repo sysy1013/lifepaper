@@ -50,6 +50,7 @@ from core.gemini import (
 from core.masking import (
     apply_mask,
     build_mask_map,
+    extend_mask_map,
     remove_mask,
     suggest_mask_candidates,
 )
@@ -762,6 +763,14 @@ with st.sidebar:
         "결과에서 원래 단어로 자동 복원됩니다.",
         key="mask_words_raw",
     )
+    auto_mask = st.toggle(
+        "🛡️ 자동 마스킹 (권장)",
+        value=True,
+        key="auto_mask",
+        help="위 목록에 등록하지 않았더라도, 전송할 텍스트에서 발견된 "
+        "이름·학번·전화번호·주민등록번호·이메일 패턴을 Gemini API 전송 직전에 "
+        "자동으로 《비공개n》 토큰으로 치환하고, 결과에서 원래 표현으로 복원합니다.",
+    )
     mask_map = build_mask_map(parse_custom_words(mask_words_raw))
 
     major = st.text_input(
@@ -879,6 +888,22 @@ with st.sidebar:
         else:
             st.error(proj_msg)
         st.session_state.pop("proj_msg", None)
+
+
+# ── 자동 마스킹 안전망 ──
+def masked_ctx(texts: list[str]) -> tuple[list[tuple[str, str]], list[str]]:
+    """전송할 실제 텍스트에서 개인정보를 추가 탐지한 확장 마스킹 맵을 만든다.
+
+    반환된 맵은 해당 작업의 마스킹·복원 양쪽에 모두 사용해야 복원이 정확하다.
+    """
+    return extend_mask_map(texts, mask_map, st.session_state.get("auto_mask", True))
+
+
+def render_auto_mask_note(auto_words: list[str]) -> None:
+    """이번 작업에서 자동 마스킹된 표현을 교사가 확인할 수 있도록 표시한다."""
+    if auto_words:
+        st.caption("🛡️ 자동 마스킹 적용: " + ", ".join(auto_words))
+
 
 # ── 모드 선택 ──
 mode = st.radio(
@@ -1007,8 +1032,10 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state.pop("proofread_review", None)
 
             inputs = [(name, text, "") for name, text in entries]
+            # 전송 직전, 실제 본문에서 개인정보를 추가 탐지해 확장 맵으로 일괄 전송한다.
+            batch_map, _ = masked_ctx([t for _, t, _ in inputs])
             st.session_state["batch_review"] = run_batch_review_pipeline(
-                inputs, major, api_key, custom_words, mask_map
+                inputs, major, api_key, custom_words, batch_map
             )
             record_history(f"명렬표 일괄 검토 {len(inputs)}건", "")
         elif len(review_files) > 1:
@@ -1028,8 +1055,9 @@ if mode == "🔍 기재 금지 표현 검토":
                 except Exception as e:
                     inputs.append((stem, "", str(e)))
 
+            batch_map, _ = masked_ctx([t for _, t, _ in inputs])
             st.session_state["batch_review"] = run_batch_review_pipeline(
-                inputs, major, api_key, custom_words, mask_map
+                inputs, major, api_key, custom_words, batch_map
             )
             record_history(f"일괄 검토 {len(inputs)}건", "")
         else:
@@ -1043,10 +1071,11 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state.pop("revised_text", None)
             st.session_state.pop("proofread_review", None)
 
+            single_map, _ = masked_ctx([input_text])
             with st.spinner(f"규칙 기반 필터링 + Gemini 문맥 심사 중… ({get_active_model()})"):
                 try:
                     findings = review_text_masked(
-                        input_text, major, api_key, custom_words, mask_map
+                        input_text, major, api_key, custom_words, single_map
                     )
                     st.session_state["review_result"] = {
                         "text": input_text,
@@ -1061,13 +1090,19 @@ if mode == "🔍 기재 금지 표현 검토":
     # ── 검토 실행 전에도 입력 텍스트만으로 오탈자 검사 가능 ──
     if input_text.strip() and not st.session_state.get("review_result"):
         st.divider()
-        render_proofread_block(input_text, api_key, mask_map, "proofread_review")
+        pre_map, pre_auto = masked_ctx([input_text])
+        render_auto_mask_note(pre_auto)
+        render_proofread_block(input_text, api_key, pre_map, "proofread_review")
 
     # ── 단일 검토 결과 렌더링 ──
     review = st.session_state.get("review_result")
     if review:
         st.divider()
         st.subheader("2️⃣ 위반 표현 하이라이트 및 분량 검사")
+
+        # 이 검토 본문에 대한 확장 마스킹 맵 (수정본·품질·오탈자 모두 이 맵을 공유)
+        rev_map, rev_auto = masked_ctx([review["text"]])
+        render_auto_mask_note(rev_auto)
 
         render_length_metrics(review["text"], neis_limit)
         render_style_warnings(review["text"])
@@ -1080,17 +1115,17 @@ if mode == "🔍 기재 금지 표현 검토":
                 with st.spinner(f"수정본 생성 중… ({get_active_model()})"):
                     try:
                         masked_findings = [
-                            {**f, "word": apply_mask(f["word"], mask_map)}
+                            {**f, "word": apply_mask(f["word"], rev_map)}
                             for f in findings
                         ]
                         revised = rewrite_with_gemini(
-                            apply_mask(review["text"], mask_map),
+                            apply_mask(review["text"], rev_map),
                             masked_findings,
                             major,
                             api_key,
                         )
                         st.session_state["revised_text"] = remove_mask(
-                            revised, mask_map
+                            revised, rev_map
                         )
                         record_history("수정본", st.session_state["revised_text"])
                     except Exception as e:
@@ -1100,8 +1135,11 @@ if mode == "🔍 기재 금지 표현 검토":
             if revised:
                 st.text_area("수정본 (복사해서 사용하세요)", value=revised, height=250)
                 render_length_metrics(revised, neis_limit)
+                # 수정본에도 개인정보가 남아 있을 수 있으므로 원문+수정본으로 다시 확장
+                rev2_map, rev2_auto = masked_ctx([review["text"], revised])
+                render_auto_mask_note(rev2_auto)
                 render_length_adjuster(
-                    "revised_text", api_key, mask_map, neis_limit, "revised"
+                    "revised_text", api_key, rev2_map, neis_limit, "revised"
                 )
 
                 recheck = rule_based_filter(revised, custom_words)
@@ -1128,7 +1166,7 @@ if mode == "🔍 기재 금지 표현 검토":
                     with st.spinner(f"수정본 재검토 중… ({get_active_model()})"):
                         try:
                             new_findings = review_text_masked(
-                                revised, major, api_key, custom_words, mask_map
+                                revised, major, api_key, custom_words, rev2_map
                             )
                             st.session_state["review_result"] = {
                                 "text": revised,
@@ -1149,11 +1187,11 @@ if mode == "🔍 기재 금지 표현 검토":
 
         st.divider()
         render_quality_block(
-            apply_mask(review["text"], mask_map), major, api_key, "quality_review"
+            apply_mask(review["text"], rev_map), major, api_key, "quality_review"
         )
 
         st.divider()
-        render_proofread_block(review["text"], api_key, mask_map, "proofread_review")
+        render_proofread_block(review["text"], api_key, rev_map, "proofread_review")
 
     # ── 일괄 검토 결과 렌더링 ──
     batch_review = st.session_state.get("batch_review")
@@ -1170,6 +1208,10 @@ if mode == "🔍 기재 금지 표현 검토":
         render_mask_suggestions(
             [b["text"] for b in ok], mask_words_raw, "mode1_batch"
         )
+
+        # 일괄 후처리(수정본·품질·오탈자)에서 공유할 확장 마스킹 맵
+        bpost_map, bpost_auto = masked_ctx([b["text"] for b in ok])
+        render_auto_mask_note(bpost_auto)
 
         # 반 전체 오탐(false-positive) 무시 컨트롤 (모든 검출어 대상)
         all_findings = [f for b in ok for f in b["findings"]]
@@ -1271,13 +1313,13 @@ if mode == "🔍 기재 금지 표현 검토":
                 b = targets[idx]
                 try:
                     masked_findings = [
-                        {**f, "word": apply_mask(f["word"], mask_map)}
+                        {**f, "word": apply_mask(f["word"], bpost_map)}
                         for f in filter_ignored(b["findings"], ignored_now)
                     ]
                     revised = rewrite_with_gemini(
-                        apply_mask(b["text"], mask_map), masked_findings, major, api_key
+                        apply_mask(b["text"], bpost_map), masked_findings, major, api_key
                     )
-                    return remove_mask(revised, mask_map), ""
+                    return remove_mask(revised, bpost_map), ""
                 except Exception as e:
                     return "", str(e)
 
@@ -1292,7 +1334,7 @@ if mode == "🔍 기재 금지 표현 검토":
                 try:
                     return (
                         assess_quality_with_gemini(
-                            apply_mask(b["text"], mask_map), major, api_key
+                            apply_mask(b["text"], bpost_map), major, api_key
                         ),
                         "",
                     )
@@ -1309,11 +1351,11 @@ if mode == "🔍 기재 금지 표현 검토":
                 b = ok[idx]
                 try:
                     items = proofread_with_gemini(
-                        apply_mask(b["text"], mask_map), api_key
+                        apply_mask(b["text"], bpost_map), api_key
                     )
                     for it in items:
-                        it["wrong"] = remove_mask(it["wrong"], mask_map)
-                        it["correct"] = remove_mask(it["correct"], mask_map)
+                        it["wrong"] = remove_mask(it["wrong"], bpost_map)
+                        it["correct"] = remove_mask(it["correct"], bpost_map)
                     return items, ""
                 except Exception as e:
                     return None, str(e)
@@ -1666,8 +1708,13 @@ else:
                     except Exception as e:
                         inputs.append((stem, "", str(e)))
 
-            masked_performance = apply_mask(performance_text, mask_map)
-            masked_style_examples = [apply_mask(x, mask_map) for x in style_examples]
+            # 전송할 실제 텍스트(수행평가 + 전체 자기평가서)에서 개인정보 추가 탐지
+            bdraft_map, bdraft_auto = masked_ctx(
+                [performance_text] + [t for _, t, _ in inputs] + list(style_examples)
+            )
+            render_auto_mask_note(bdraft_auto)
+            masked_performance = apply_mask(performance_text, bdraft_map)
+            masked_style_examples = [apply_mask(x, bdraft_map) for x in style_examples]
 
             def _draft_job(idx: int) -> dict:
                 stem, eval_text, err = inputs[idx]
@@ -1678,13 +1725,17 @@ else:
                         subject,
                         major,
                         masked_performance,
-                        apply_mask(eval_text, mask_map),
+                        apply_mask(eval_text, bdraft_map),
                         target_len,
                         api_key,
                         style_examples=masked_style_examples,
                         category=draft_category,
                     )
-                    return {"name": stem, "draft": remove_mask(draft, mask_map), "error": ""}
+                    return {
+                        "name": stem,
+                        "draft": remove_mask(draft, bdraft_map),
+                        "error": "",
+                    }
                 except Exception as e:
                     return {"name": stem, "draft": "", "error": str(e)}
 
@@ -1694,10 +1745,15 @@ else:
             record_history(f"일괄 초안 {len(inputs)}건", "")
         else:
             # ── 단일 생성 ──
-            masked_performance = apply_mask(performance_text, mask_map)
-            masked_self_eval = apply_mask(single_eval_text, mask_map)
-            masked_style_examples = [apply_mask(x, mask_map) for x in style_examples]
-            masked_observations = apply_mask(observations_text, mask_map)
+            sdraft_map, sdraft_auto = masked_ctx(
+                [performance_text, single_eval_text, observations_text]
+                + list(style_examples)
+            )
+            render_auto_mask_note(sdraft_auto)
+            masked_performance = apply_mask(performance_text, sdraft_map)
+            masked_self_eval = apply_mask(single_eval_text, sdraft_map)
+            masked_style_examples = [apply_mask(x, sdraft_map) for x in style_examples]
+            masked_observations = apply_mask(observations_text, sdraft_map)
             # 재생성 시 원자료 맥락 전달용 (마스킹된 상태로 보관)
             draft_context = {
                 "subject": subject.strip(),
@@ -1730,7 +1786,7 @@ else:
             if dual_draft:
                 # ── 2버전 동시 생성 ──
                 outs = run_parallel(2, _single_draft_job, "2버전 생성 중…")
-                variants = [remove_mask(d, mask_map) for d, _ in outs]
+                variants = [remove_mask(d, sdraft_map) for d, _ in outs]
                 errors = [err for _, err in outs if err]
                 if any(not v.strip() for v in variants):
                     st.error(
@@ -1747,7 +1803,7 @@ else:
                     if err:
                         st.error(f"❌ Gemini API 호출 실패: {err}")
                     else:
-                        st.session_state["draft_text"] = remove_mask(draft, mask_map)
+                        st.session_state["draft_text"] = remove_mask(draft, sdraft_map)
                         record_history(
                             f"초안: {subject or '무제'}", st.session_state["draft_text"]
                         )
@@ -1779,10 +1835,13 @@ else:
 
         st.text_area("초안 (복사해서 사용하세요)", value=draft, height=280)
         render_length_metrics(draft, neis_limit)
+        # 이 초안에 대한 확장 마스킹 맵 (분량 조절·품질·오탈자가 공유)
+        draft_map, draft_auto = masked_ctx([draft])
+        render_auto_mask_note(draft_auto)
         render_length_adjuster(
             "draft_text",
             api_key,
-            mask_map,
+            draft_map,
             target_len,
             "draft",
             clear_keys=("quality_draft", "proofread_draft"),
@@ -1818,16 +1877,20 @@ else:
             if not feedback.strip():
                 st.warning("⚠️ 반영할 피드백을 먼저 입력해 주세요.")
             else:
+                # 피드백 문장에도 학생 이름이 섞일 수 있어 함께 탐지한다.
+                refine_map, _ = masked_ctx([draft, feedback])
                 with st.spinner(f"피드백 반영 재생성 중… ({get_active_model()})"):
                     try:
                         refined = refine_draft_with_gemini(
-                            apply_mask(draft, mask_map),
-                            apply_mask(feedback, mask_map),
+                            apply_mask(draft, refine_map),
+                            apply_mask(feedback, refine_map),
                             target_len,
                             api_key,
                             context=st.session_state.get("draft_context"),
                         )
-                        st.session_state["draft_text"] = remove_mask(refined, mask_map)
+                        st.session_state["draft_text"] = remove_mask(
+                            refined, refine_map
+                        )
                         record_history(
                             "초안(피드백 반영)", st.session_state["draft_text"]
                         )
@@ -1839,14 +1902,14 @@ else:
 
         st.divider()
         render_quality_block(
-            apply_mask(draft, mask_map), major, api_key, "quality_draft"
+            apply_mask(draft, draft_map), major, api_key, "quality_draft"
         )
 
         st.divider()
         render_proofread_block(
             draft,
             api_key,
-            mask_map,
+            draft_map,
             "proofread_draft",
             apply_to_key="draft_text",
             clear_keys=("quality_draft",),
@@ -1872,6 +1935,8 @@ else:
             )
 
         # ── 일괄 후처리: 품질 진단 / 오탈자 ──
+        dpost_map, dpost_auto = masked_ctx([b["draft"] for b in ok])
+        render_auto_mask_note(dpost_auto)
         col_q, col_p = st.columns(2)
         if col_q.button(f"🏅 전체 품질 진단 ({len(ok)}명)", use_container_width=True):
             def _dq_job(idx: int) -> tuple[dict | None, str]:
@@ -1879,7 +1944,7 @@ else:
                 try:
                     return (
                         assess_quality_with_gemini(
-                            apply_mask(b["draft"], mask_map), major, api_key
+                            apply_mask(b["draft"], dpost_map), major, api_key
                         ),
                         "",
                     )
@@ -1896,11 +1961,11 @@ else:
                 b = ok[idx]
                 try:
                     items = proofread_with_gemini(
-                        apply_mask(b["draft"], mask_map), api_key
+                        apply_mask(b["draft"], dpost_map), api_key
                     )
                     for it in items:
-                        it["wrong"] = remove_mask(it["wrong"], mask_map)
-                        it["correct"] = remove_mask(it["correct"], mask_map)
+                        it["wrong"] = remove_mask(it["wrong"], dpost_map)
+                        it["correct"] = remove_mask(it["correct"], dpost_map)
                     return items, ""
                 except Exception as e:
                     return None, str(e)
