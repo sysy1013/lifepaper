@@ -61,6 +61,7 @@ from core.parsing import (
     build_eval_template,
     file_stem,
     guess_roster_columns,
+    ocr_available,
     parse_eval_table,
     parse_roster_table,
     read_uploaded_file,
@@ -1541,7 +1542,11 @@ else:
             else:
                 activity_raw = ""
                 try:
-                    activity_raw = read_uploaded_file(activity_file)
+                    # 스캔 PDF는 서버 안에서 글자 인식(OCR)을 하므로 시간이 걸린다.
+                    with st.spinner(
+                        "파일에서 글자를 읽는 중… (스캔 문서는 시간이 더 걸립니다)"
+                    ):
+                        activity_raw = read_uploaded_file(activity_file)
                 except Exception as e:
                     st.warning(
                         f"⚠️ 파일에서 읽을 수 있는 텍스트를 찾지 못했습니다: {e} "
@@ -1549,9 +1554,15 @@ else:
                         "내용을 아래 칸에 직접 붙여넣어 주세요.)"
                     )
                 if activity_raw and len(activity_raw.strip()) < 30:
+                    ocr_note = (
+                        ""
+                        if ocr_available()
+                        else "이 서버에서는 스캔 문서 글자 인식을 사용할 수 없습니다. "
+                    )
                     st.warning(
                         "⚠️ 파일에서 읽을 수 있는 텍스트가 거의 없습니다. "
-                        "스캔한 이미지 PDF는 텍스트가 없어 요약할 수 없습니다. "
+                        "스캔한 이미지 PDF로 보입니다. "
+                        f"{ocr_note}"
                         "내용을 아래 칸에 직접 붙여넣어 주세요."
                     )
                 elif activity_raw:

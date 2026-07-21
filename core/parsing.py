@@ -107,20 +107,95 @@ def extract_docx_text(data: bytes) -> str:
     return "\n".join(paragraphs).rstrip()
 
 
+# ──────────────────────────────────────────────
+# 스캔(이미지) PDF 로컬 OCR
+# ──────────────────────────────────────────────
+# 텍스트 레이어가 이 길이 미만이면 스캔 PDF로 보고 OCR로 넘어간다.
+_PDF_TEXT_MIN_CHARS = 30
+
+# 문서 한 덩어리를 통째로 읽게 하는 설정(--psm 6).
+# 기본 자동 분할은 한글 보고서에서 줄을 통째로 놓치는 경우가 많아 실측 후 고정했다.
+OCR_CONFIG = "--psm 6"
+
+
+def ocr_available() -> bool:
+    """tesseract 실행 파일과 pytesseract가 모두 준비되어 있는지 확인한다."""
+    import os
+    import shutil
+
+    try:
+        import pytesseract
+    except Exception:
+        return False
+
+    cmd = getattr(getattr(pytesseract, "pytesseract", None), "tesseract_cmd", None)
+    if cmd and os.path.isfile(cmd):
+        return True
+    return shutil.which("tesseract") is not None
+
+
+def ocr_pdf_text(data: bytes, max_pages: int = 10, dpi: int = 200) -> str:
+    """스캔(이미지) PDF를 페이지별로 렌더링해 로컬 OCR로 글자를 읽는다.
+
+    이미지는 외부로 전송하지 않는다. 한국어+영어 인식을 시도한다.
+    """
+    if not ocr_available():
+        raise RuntimeError(
+            "이 서버에서는 스캔 문서 글자 인식(OCR)을 사용할 수 없습니다."
+        )
+
+    import fitz  # PyMuPDF
+    import pytesseract
+    from PIL import Image
+
+    texts: list[str] = []
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        for page_no in range(min(max_pages, doc.page_count)):
+            pix = doc[page_no].get_pixmap(dpi=dpi)
+            with Image.open(io.BytesIO(pix.tobytes("png"))) as img:
+                try:
+                    page_text = pytesseract.image_to_string(
+                        img, lang="kor+eng", config=OCR_CONFIG
+                    )
+                except Exception as e:
+                    # 한국어 학습 데이터(kor.traineddata)가 없으면 영어만으로 재시도
+                    if "kor" not in str(e):
+                        raise
+                    page_text = pytesseract.image_to_string(
+                        img, lang="eng", config=OCR_CONFIG
+                    )
+            texts.append(page_text)
+    return "\n".join(texts).strip()
+
+
 def extract_pdf_text(data: bytes) -> str:
     """PDF 파일에서 페이지별 텍스트를 추출해 줄바꿈으로 이어 붙인다.
 
-    스캔 이미지 PDF 등 텍스트 레이어가 없어 추출 결과가 비면 ValueError를 낸다.
+    텍스트 레이어가 거의 없는 스캔 이미지 PDF는 로컬 OCR로 자동 대체한다.
+    (이미지는 외부로 전송하지 않는다.) OCR도 불가능하면 ValueError를 낸다.
     """
     from pypdf import PdfReader
 
     reader = PdfReader(io.BytesIO(data))
     text = "\n".join(page.extract_text() or "" for page in reader.pages).strip()
-    if not text:
-        raise ValueError(
-            "PDF에서 텍스트를 찾지 못했습니다. 스캔 이미지 PDF는 지원되지 않습니다."
-        )
-    return text
+    if len(text) >= _PDF_TEXT_MIN_CHARS:
+        return text
+
+    if ocr_available():
+        try:
+            ocr_text = ocr_pdf_text(data)
+        except Exception:
+            ocr_text = ""
+        if ocr_text.strip():
+            return ocr_text.strip()
+
+    if text:
+        return text
+
+    raise ValueError(
+        "PDF에서 텍스트를 찾지 못했습니다. 스캔한 이미지 PDF로 보입니다. "
+        "글자를 선택할 수 있는 PDF나 한글(.hwp/.hwpx)·워드(.docx) 파일을 올려 주세요."
+    )
 
 
 def read_uploaded_file(uploaded_file) -> str:
