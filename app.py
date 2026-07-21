@@ -60,6 +60,7 @@ from core.masking import (
 from core.parsing import (
     build_eval_template,
     file_stem,
+    guess_major_column,
     guess_roster_columns,
     ocr_available,
     parse_eval_table,
@@ -144,6 +145,14 @@ def render_replace_control(state_key: str, field: str, widget_key: str) -> None:
                 st.rerun()
 
 
+# 표(명렬표·엑셀 자기평가서)에서 학생별 희망 진로 열을 고르는 UI 문구
+NO_MAJOR_COL = "(사용 안 함)"
+MAJOR_COL_HINT = (
+    "학생마다 진로가 다르면 이 열을 지정하세요. "
+    "비워 두면 사이드바의 진로가 모든 학생에게 적용됩니다."
+)
+
+
 def run_parallel(n: int, job, label: str) -> list:
     """job(idx)를 BATCH_WORKERS 동시 실행. 진행바 표시, 입력 순서대로 결과 반환."""
     results: list = [None] * n
@@ -162,21 +171,49 @@ def run_parallel(n: int, job, label: str) -> list:
 
 
 def run_batch_review_pipeline(
-    inputs: list[tuple[str, str, str]], major, api_key, custom_words, mask_map
+    inputs: list[tuple[str, str, str, str]], major, api_key, custom_words, mask_map
 ) -> list:
-    """(stem, text, err) 입력 목록으로 병렬 일괄 검토를 실행한다.
+    """(stem, text, err, entry_major) 입력 목록으로 병렬 일괄 검토를 실행한다.
 
     여러 파일 업로드·명렬표 업로드가 동일한 파이프라인을 공유한다.
+    entry_major(학생별 희망 진로)가 비어 있으면 사이드바 major를 대신 쓴다.
+    확정된 진로는 결과 항목의 "major"에 남겨 일괄 후처리에서 재사용한다.
     """
     def _review_job(idx: int) -> dict:
-        stem, text, err = inputs[idx]
+        stem, text, err, entry_major = inputs[idx]
+        row_major = (entry_major or "").strip()
+        eff_major = row_major or major
         if err:
-            return {"name": stem, "text": "", "findings": [], "error": err}
+            return {
+                "name": stem,
+                "text": "",
+                "findings": [],
+                "error": err,
+                "major": eff_major,
+                "row_major": row_major,
+            }
         try:
-            findings = review_text_masked(text, major, api_key, custom_words, mask_map)
-            return {"name": stem, "text": text, "findings": findings, "error": ""}
+            # review_text_masked가 내부에서 major까지 마스킹해 전송한다.
+            findings = review_text_masked(
+                text, eff_major, api_key, custom_words, mask_map
+            )
+            return {
+                "name": stem,
+                "text": text,
+                "findings": findings,
+                "error": "",
+                "major": eff_major,
+                "row_major": row_major,
+            }
         except Exception as e:
-            return {"name": stem, "text": "", "findings": [], "error": str(e)}
+            return {
+                "name": stem,
+                "text": "",
+                "findings": [],
+                "error": str(e),
+                "major": eff_major,
+                "row_major": row_major,
+            }
 
     return run_parallel(len(inputs), _review_job, "일괄 검토 중…")
 
@@ -929,6 +966,7 @@ if mode == "🔍 기재 금지 표현 검토":
     roster_df = None
     roster_name_col = None
     roster_text_col = None
+    roster_major_col = None
 
     if input_method.startswith("파일 업로드"):
         st.markdown(
@@ -981,6 +1019,22 @@ if mode == "🔍 기재 금지 표현 검토":
                 roster_text_col = c2.selectbox(
                     "내용 열", cols, index=cols.index(guess_text), key="roster_text_col"
                 )
+                guess_major = guess_major_column(roster_df)
+                major_options = [NO_MAJOR_COL] + cols
+                roster_major_col = st.selectbox(
+                    "희망 진로 열 (선택)",
+                    major_options,
+                    index=(
+                        major_options.index(guess_major)
+                        if guess_major in major_options
+                        else 0
+                    ),
+                    key="roster_major_col",
+                )
+                st.caption(MAJOR_COL_HINT)
+                roster_major_col = (
+                    None if roster_major_col == NO_MAJOR_COL else roster_major_col
+                )
         elif len(review_files) == 1:
             try:
                 input_text = read_uploaded_file(review_files[0])
@@ -1018,7 +1072,9 @@ if mode == "🔍 기재 금지 표현 검토":
             if roster_df is None or roster_df.empty:
                 st.warning("⚠️ 명렬표에서 읽을 데이터가 없습니다.")
                 st.stop()
-            entries = parse_roster_table(roster_df, roster_name_col, roster_text_col)
+            entries = parse_roster_table(
+                roster_df, roster_name_col, roster_text_col, roster_major_col
+            )
             if not entries:
                 st.warning("⚠️ 이름·내용이 모두 채워진 행이 없습니다. 열 선택을 확인해 주세요.")
                 st.stop()
@@ -1028,9 +1084,16 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state.pop("quality_review", None)
             st.session_state.pop("proofread_review", None)
 
-            inputs = [(name, text, "") for name, text in entries]
-            # 전송 직전, 실제 본문에서 개인정보를 추가 탐지해 확장 맵으로 일괄 전송한다.
-            batch_map, _ = masked_ctx([t for _, t, _ in inputs] + [major])
+            inputs = [
+                (name, text, "", entry_major) for name, text, entry_major in entries
+            ]
+            # 전송 직전, 실제 본문·학생별 진로에서 개인정보를 추가 탐지해
+            # 확장 맵으로 일괄 전송한다.
+            batch_map, _ = masked_ctx(
+                [t for _, t, _, _ in inputs]
+                + [m for _, _, _, m in inputs if m]
+                + [major]
+            )
             st.session_state["batch_review"] = run_batch_review_pipeline(
                 inputs, major, api_key, custom_words, batch_map
             )
@@ -1045,14 +1108,15 @@ if mode == "🔍 기재 금지 표현 검토":
             stems = unique_names([file_stem(f.name) for f in review_files])
 
             # 파일 읽기는 메인 스레드에서 (UploadedFile은 스레드 안전하지 않음)
+            # 파일 업로드에는 학생별 진로 정보가 없으므로 ""(사이드바 값 사용)
             inputs = []
             for f, stem in zip(review_files, stems):
                 try:
-                    inputs.append((stem, read_uploaded_file(f), ""))
+                    inputs.append((stem, read_uploaded_file(f), "", ""))
                 except Exception as e:
-                    inputs.append((stem, "", str(e)))
+                    inputs.append((stem, "", str(e), ""))
 
-            batch_map, _ = masked_ctx([t for _, t, _ in inputs] + [major])
+            batch_map, _ = masked_ctx([t for _, t, _, _ in inputs] + [major])
             st.session_state["batch_review"] = run_batch_review_pipeline(
                 inputs, major, api_key, custom_words, batch_map
             )
@@ -1207,7 +1271,18 @@ if mode == "🔍 기재 금지 표현 검토":
         )
 
         # 일괄 후처리(수정본·품질·오탈자)에서 공유할 확장 마스킹 맵
-        bpost_map, bpost_auto = masked_ctx([b["text"] for b in ok] + [major])
+        def entry_major(b: dict) -> str:
+            """학생별 진로가 있으면 그것을, 없으면 사이드바 진로를 쓴다."""
+            return (b.get("major") or "").strip() or major
+
+        # 학생별 진로가 하나라도 있으면 표·상세에 진로를 함께 보여 준다.
+        has_own_major = any((b.get("row_major") or "").strip() for b in ok)
+
+        bpost_map, bpost_auto = masked_ctx(
+            [b["text"] for b in ok]
+            + [b["major"] for b in ok if b.get("major")]
+            + [major]
+        )
         render_auto_mask_note(bpost_auto)
 
         # 반 전체 오탐(false-positive) 무시 컨트롤 (모든 검출어 대상)
@@ -1242,6 +1317,8 @@ if mode == "🔍 기재 금지 표현 검토":
                 "주의": n_caution,
                 "주요 검출 표현": top_words,
             }
+            if has_own_major:
+                row["진로"] = entry_major(b)
             if b.get("quality"):
                 avg = quality_avg(b["quality"])
                 row["품질(5점)"] = f"{avg:.1f}" if avg is not None else "-"
@@ -1315,7 +1392,7 @@ if mode == "🔍 기재 금지 표현 검토":
                     revised = rewrite_with_gemini(
                         apply_mask(b["text"], bpost_map),
                         masked_findings,
-                        apply_mask(major, bpost_map),
+                        apply_mask(entry_major(b), bpost_map),
                         api_key,
                     )
                     return remove_mask(revised, bpost_map), ""
@@ -1335,7 +1412,7 @@ if mode == "🔍 기재 금지 표현 검토":
                         remove_mask_deep(
                             assess_quality_with_gemini(
                                 apply_mask(b["text"], bpost_map),
-                                apply_mask(major, bpost_map),
+                                apply_mask(entry_major(b), bpost_map),
                                 api_key,
                             ),
                             bpost_map,
@@ -1426,6 +1503,8 @@ if mode == "🔍 기재 금지 표현 검토":
             n_found = len(b_findings)
             label = f"📄 {b['name']} — {len(b['text']):,}자, 검출 {n_found}건"
             with st.expander(label):
+                if has_own_major:
+                    st.caption(f"🎯 희망 진로: {entry_major(b)}")
                 if b_findings:
                     render_highlight_box(
                         b["text"],
@@ -1667,6 +1746,7 @@ else:
     eval_df = None
     eval_name_col = None
     eval_content_cols = None
+    eval_major_col = None
     eval_spreadsheets = [
         f for f in eval_files if f.name.lower().endswith((".csv", ".xlsx"))
     ]
@@ -1705,6 +1785,22 @@ else:
                 [c for c in cols if c != eval_name_col],
                 default=[c for c in cols if c != eval_name_col],
                 key="eval_content_cols",
+            )
+            guess_major = guess_major_column(eval_df)
+            eval_major_options = [NO_MAJOR_COL] + cols
+            eval_major_col = st.selectbox(
+                "희망 진로 열 (선택)",
+                eval_major_options,
+                index=(
+                    eval_major_options.index(guess_major)
+                    if guess_major in eval_major_options
+                    else 0
+                ),
+                key="eval_major_col",
+            )
+            st.caption(MAJOR_COL_HINT)
+            eval_major_col = (
+                None if eval_major_col == NO_MAJOR_COL else eval_major_col
             )
     elif len(eval_files) == 1:
         try:
@@ -1780,28 +1876,34 @@ else:
                 if not eval_content_cols:
                     st.warning("⚠️ 자기평가 문항 열을 하나 이상 선택해 주세요.")
                     st.stop()
-                entries = parse_eval_table(eval_df, eval_name_col, eval_content_cols)
+                entries = parse_eval_table(
+                    eval_df, eval_name_col, eval_content_cols, eval_major_col
+                )
                 if not entries:
                     st.warning("⚠️ 이름·자기평가 내용이 채워진 행이 없습니다. 열 선택을 확인해 주세요.")
                     st.stop()
-                inputs: list[tuple[str, str, str]] = [
-                    (name, text, "") for name, text in entries
+                inputs: list[tuple[str, str, str, str]] = [
+                    (name, text, "", entry_row_major)
+                    for name, text, entry_row_major in entries
                 ]
             else:
                 stems = unique_names([file_stem(f.name) for f in eval_files])
 
                 # 파일 읽기는 메인 스레드에서 (UploadedFile은 스레드 안전하지 않음)
+                # 파일 업로드에는 학생별 진로가 없으므로 ""(사이드바 값 사용)
                 inputs = []
                 for f, stem in zip(eval_files, stems):
                     try:
-                        inputs.append((stem, read_uploaded_file(f), ""))
+                        inputs.append((stem, read_uploaded_file(f), "", ""))
                     except Exception as e:
-                        inputs.append((stem, "", str(e)))
+                        inputs.append((stem, "", str(e), ""))
 
-            # 전송할 실제 텍스트(수행평가 + 전체 자기평가서)에서 개인정보 추가 탐지
+            # 전송할 실제 텍스트(수행평가 + 전체 자기평가서 + 학생별 진로)에서
+            # 개인정보 추가 탐지
             bdraft_map, bdraft_auto = masked_ctx(
                 [performance_text, subject, major]
-                + [t for _, t, _ in inputs]
+                + [t for _, t, _, _ in inputs]
+                + [m for _, _, _, m in inputs if m]
                 + list(style_examples)
             )
             render_auto_mask_note(bdraft_auto)
@@ -1811,13 +1913,22 @@ else:
             masked_major = apply_mask(major, bdraft_map)
 
             def _draft_job(idx: int) -> dict:
-                stem, eval_text, err = inputs[idx]
+                stem, eval_text, err, row_major = inputs[idx]
+                row_major = (row_major or "").strip()
+                # 학생별 진로가 있으면 그것을, 없으면 사이드바 진로를 쓴다.
+                eff_major = row_major or major
                 if err:
-                    return {"name": stem, "draft": "", "error": err}
+                    return {
+                        "name": stem,
+                        "draft": "",
+                        "error": err,
+                        "major": eff_major,
+                        "row_major": row_major,
+                    }
                 try:
                     draft = generate_draft_with_gemini(
                         masked_subject,
-                        masked_major,
+                        apply_mask(eff_major, bdraft_map) if row_major else masked_major,
                         masked_performance,
                         apply_mask(eval_text, bdraft_map),
                         target_len,
@@ -1829,9 +1940,17 @@ else:
                         "name": stem,
                         "draft": remove_mask(draft, bdraft_map),
                         "error": "",
+                        "major": eff_major,
+                        "row_major": row_major,
                     }
                 except Exception as e:
-                    return {"name": stem, "draft": "", "error": str(e)}
+                    return {
+                        "name": stem,
+                        "draft": "",
+                        "error": str(e),
+                        "major": eff_major,
+                        "row_major": row_major,
+                    }
 
             st.session_state["batch_drafts"] = run_parallel(
                 len(inputs), _draft_job, "일괄 초안 생성 중…"
@@ -2034,9 +2153,18 @@ else:
                 + ", ".join(b["name"] for b in failed)
             )
 
+        def entry_major(b: dict) -> str:
+            """학생별 진로가 있으면 그것을, 없으면 사이드바 진로를 쓴다."""
+            return (b.get("major") or "").strip() or major
+
+        # 학생별 진로가 하나라도 있으면 학생별 초안에 진로를 함께 보여 준다.
+        has_own_major = any((b.get("row_major") or "").strip() for b in ok)
+
         # ── 일괄 후처리: 품질 진단 / 오탈자 ──
         dpost_map, dpost_auto = masked_ctx(
-            [b["draft"] for b in ok] + [subject, major]
+            [b["draft"] for b in ok]
+            + [b["major"] for b in ok if b.get("major")]
+            + [subject, major]
         )
         render_auto_mask_note(dpost_auto)
         col_q, col_p = st.columns(2)
@@ -2048,7 +2176,7 @@ else:
                         remove_mask_deep(
                             assess_quality_with_gemini(
                                 apply_mask(b["draft"], dpost_map),
-                                apply_mask(major, dpost_map),
+                                apply_mask(entry_major(b), dpost_map),
                                 api_key,
                             ),
                             dpost_map,
@@ -2103,6 +2231,8 @@ else:
             over = len(b["draft"]) > neis_limit if neis_limit else False
             label = f"📄 {b['name']} — {len(b['draft']):,}자" + (" 🚨 분량 초과" if over else "")
             with st.expander(label):
+                if has_own_major:
+                    st.caption(f"🎯 희망 진로: {entry_major(b)}")
                 st.text_area(
                     "초안", value=b["draft"], height=200, key=f"batch_{b['name']}"
                 )

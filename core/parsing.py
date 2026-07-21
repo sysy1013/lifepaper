@@ -234,14 +234,28 @@ def unique_names(names: list[str]) -> list[str]:
 # ──────────────────────────────────────────────
 # 반 전체 명렬표(.csv/.xlsx) 파싱
 # ──────────────────────────────────────────────
-def parse_roster_table(df, name_col: str, text_col: str) -> list[tuple[str, str]]:
-    """명렬표 DataFrame에서 (이름, 내용) 목록을 만든다.
+def _cell_str(row, col: str | None) -> str:
+    """행에서 선택 열의 값을 공백 정리된 문자열로 읽는다. 열이 없거나 결측이면 ""."""
+    if not col or col not in row.index:
+        return ""
+    value = row[col]
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def parse_roster_table(
+    df, name_col: str, text_col: str, major_col: str | None = None
+) -> list[tuple[str, str, str]]:
+    """명렬표 DataFrame에서 (이름, 내용, 진로) 목록을 만든다.
 
     이름 또는 내용이 비어 있는(공백·NaN) 행은 제외하고, 중복 이름은
     unique_names로 순번을 붙여 구분한다. 행 순서는 그대로 유지한다.
+    major_col을 지정하지 않았거나 셀이 비었으면 진로는 ""가 된다.
     """
     names: list[str] = []
     texts: list[str] = []
+    majors: list[str] = []
     for _, row in df.iterrows():
         name = row[name_col]
         text = row[text_col]
@@ -254,7 +268,8 @@ def parse_roster_table(df, name_col: str, text_col: str) -> list[tuple[str, str]
             continue
         names.append(name)
         texts.append(text)
-    return list(zip(unique_names(names), texts))
+        majors.append(_cell_str(row, major_col))
+    return list(zip(unique_names(names), texts, majors))
 
 
 def guess_roster_columns(df) -> tuple[str, str]:
@@ -283,18 +298,35 @@ def guess_roster_columns(df) -> tuple[str, str]:
     return name_col, text_col
 
 
+# 희망 진로/학과 열로 보이는 헤더 키워드
+_MAJOR_COLUMN_KEYWORDS = ("진로", "학과", "희망", "지망")
+
+
+def guess_major_column(df) -> str | None:
+    """진로/학과로 보이는 열 이름을 찾는다. 없으면 None."""
+    for col in df.columns:
+        label = str(col).strip().lower()
+        if any(k in label for k in _MAJOR_COLUMN_KEYWORDS):
+            return col
+    return None
+
+
 # ──────────────────────────────────────────────
 # 엑셀 자기평가서(.csv/.xlsx) 일괄 파싱
 # ──────────────────────────────────────────────
-def parse_eval_table(df, name_col: str, content_cols: list[str]) -> list[tuple[str, str]]:
-    """엑셀 자기평가서에서 (이름, 자기평가 텍스트) 목록을 만든다.
+def parse_eval_table(
+    df, name_col: str, content_cols: list[str], major_col: str | None = None
+) -> list[tuple[str, str, str]]:
+    """엑셀 자기평가서에서 (이름, 자기평가 텍스트, 진로) 목록을 만든다.
 
     선택한 문항 열들을 "[문항명] 값" 형태로 이어 붙인다(빈·NaN 셀은 건너뜀).
     이름이 비었거나 합쳐진 텍스트가 빈 행은 제외하고, 중복 이름은 순번을 붙인다.
-    행 순서는 그대로 유지한다.
+    행 순서는 그대로 유지한다. major_col을 지정하지 않았거나 셀이 비었으면
+    진로는 ""가 된다.
     """
     names: list[str] = []
     texts: list[str] = []
+    majors: list[str] = []
     for _, row in df.iterrows():
         if pd.isna(row[name_col]):
             continue
@@ -313,7 +345,8 @@ def parse_eval_table(df, name_col: str, content_cols: list[str]) -> list[tuple[s
             continue
         names.append(name)
         texts.append(merged)
-    return list(zip(unique_names(names), texts))
+        majors.append(_cell_str(row, major_col))
+    return list(zip(unique_names(names), texts, majors))
 
 
 def build_eval_template() -> bytes:

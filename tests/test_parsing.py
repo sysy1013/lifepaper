@@ -12,6 +12,7 @@ from core.parsing import (
     extract_hwpx_text,
     extract_pdf_text,
     file_stem,
+    guess_major_column,
     guess_roster_columns,
     parse_eval_table,
     parse_roster_table,
@@ -110,15 +111,15 @@ def test_parse_roster_table_drops_empty_dedups_and_keeps_order():
     result = parse_roster_table(df, "이름", "내용")
     # 이름이 공백/NaN인 행은 제외, 중복 이름은 unique_names로 순번, 순서 유지.
     assert result == [
-        ("김철수", "내용A"),
-        ("이영희", "내용B"),
-        ("김철수 (2)", "내용D"),
+        ("김철수", "내용A", ""),
+        ("이영희", "내용B", ""),
+        ("김철수 (2)", "내용D", ""),
     ]
 
 
 def test_parse_roster_table_drops_empty_text():
     df = pd.DataFrame({"이름": ["김철수", "이영희"], "내용": ["내용A", "   "]})
-    assert parse_roster_table(df, "이름", "내용") == [("김철수", "내용A")]
+    assert parse_roster_table(df, "이름", "내용") == [("김철수", "내용A", "")]
 
 
 def test_guess_roster_columns_picks_short_name_and_long_text():
@@ -136,6 +137,61 @@ def test_guess_roster_columns_picks_short_name_and_long_text():
     name_col, text_col = guess_roster_columns(df)
     assert name_col == "이름"
     assert text_col == "자기평가"
+
+
+def test_parse_roster_table_reads_per_student_major():
+    df = pd.DataFrame(
+        {
+            "이름": ["김철수", "이영희", "박민수"],
+            "내용": ["내용A", "내용B", "내용C"],
+            "희망진로": ["컴퓨터공학과", "   ", None],
+        }
+    )
+    # 진로 셀이 공백·NaN이면 ""로 채워지고, 나머지 동작은 그대로다.
+    assert parse_roster_table(df, "이름", "내용", "희망진로") == [
+        ("김철수", "내용A", "컴퓨터공학과"),
+        ("이영희", "내용B", ""),
+        ("박민수", "내용C", ""),
+    ]
+
+
+def test_parse_roster_table_major_col_keeps_drop_and_dedup():
+    df = pd.DataFrame(
+        {
+            "이름": ["김철수", "  ", "김철수", None],
+            "내용": ["내용A", "내용B", "내용D", "내용E"],
+            "진로": ["의예과", "간호학과", "약학과", "치의예과"],
+        }
+    )
+    assert parse_roster_table(df, "이름", "내용", "진로") == [
+        ("김철수", "내용A", "의예과"),
+        ("김철수 (2)", "내용D", "약학과"),
+    ]
+
+
+def test_parse_eval_table_reads_per_student_major():
+    df = pd.DataFrame(
+        {
+            "이름": ["김철수", "이영희"],
+            "활동": ["활동A", "활동B"],
+            "희망 학과": ["기계공학과", None],
+        }
+    )
+    assert parse_eval_table(df, "이름", ["활동"], "희망 학과") == [
+        ("김철수", "[활동] 활동A", "기계공학과"),
+        ("이영희", "[활동] 활동B", ""),
+    ]
+
+
+def test_guess_major_column_finds_career_columns():
+    for col in ("희망진로", "진로", "학과", "1지망"):
+        df = pd.DataFrame({"이름": ["김철수"], "내용": ["내용A"], col: ["의예과"]})
+        assert guess_major_column(df) == col
+
+
+def test_guess_major_column_returns_none_when_absent():
+    df = pd.DataFrame({"이름": ["김철수"], "내용": ["내용A"]})
+    assert guess_major_column(df) is None
 
 
 # ──────────────────────────────────────────────
@@ -191,15 +247,15 @@ def test_parse_eval_table_merges_cols_skips_empty_dedups():
     # 선택 열을 [헤더] 접두로 병합, 빈 셀은 건너뜀, 이름 공백/NaN 행 제외,
     # 중복 이름은 순번, 전부 빈 행 제외, 순서 유지.
     assert result == [
-        ("김철수", "[활동] 데이터 분석\n\n[느낀점] 협업 중요"),
-        ("이영희", "[활동] 설문 조사"),
-        ("김철수 (2)", "[활동] 코딩"),
+        ("김철수", "[활동] 데이터 분석\n\n[느낀점] 협업 중요", ""),
+        ("이영희", "[활동] 설문 조사", ""),
+        ("김철수 (2)", "[활동] 코딩", ""),
     ]
 
 
 def test_parse_eval_table_drops_rows_with_all_empty_content():
     df = pd.DataFrame({"이름": ["김철수", "이영희"], "활동": ["활동A", "   "]})
-    assert parse_eval_table(df, "이름", ["활동"]) == [("김철수", "[활동] 활동A")]
+    assert parse_eval_table(df, "이름", ["활동"]) == [("김철수", "[활동] 활동A", "")]
 
 
 def test_build_eval_template_readable_with_expected_headers():
