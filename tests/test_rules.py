@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from core.rules import (
     filter_ignored,
+    find_shared_sentences,
     find_similar_pairs,
     neis_bytes,
     parse_custom_words,
@@ -105,3 +106,53 @@ def test_filter_ignored_removes_matching_words():
 def test_filter_ignored_empty_is_noop():
     findings = [{"word": "TOEIC"}, {"word": "서울대"}]
     assert filter_ignored(findings, []) == findings
+
+
+# ── find_shared_sentences ──
+SHARED = "탐구 과정을 통해 데이터를 분석하고 결론을 도출함"
+
+
+def test_find_shared_sentences_reports_all_students():
+    items = [
+        ("학생A", f"{SHARED}. 발표 자료를 스스로 제작함."),
+        ("학생B", f"수업에 대한 궁금증을 기록함. {SHARED}."),
+        ("학생C", f"{SHARED}"),
+    ]
+    result = find_shared_sentences(items)
+    assert len(result) == 1
+    sentence, names = result[0]
+    assert SHARED in sentence
+    assert sorted(names) == ["학생A", "학생B", "학생C"]
+
+
+def test_find_shared_sentences_ignores_short_sentences():
+    items = [("학생A", "성실함. 노력함."), ("학생B", "성실함. 노력함.")]
+    assert find_shared_sentences(items) == []
+
+
+def test_find_shared_sentences_ignores_repeat_within_one_student():
+    items = [
+        ("학생A", f"{SHARED}. {SHARED}."),
+        ("학생B", "완전히 다른 내용으로 봉사활동 경험을 구체적으로 서술함."),
+    ]
+    assert find_shared_sentences(items) == []
+
+
+def test_find_shared_sentences_unique_texts_return_empty():
+    items = [
+        ("학생A", "빛의 굴절 실험을 설계하고 오차 원인을 스스로 분석함."),
+        ("학생B", "지역 하천의 수질 자료를 수집해 그래프로 정리함."),
+    ]
+    assert find_shared_sentences(items) == []
+
+
+def test_find_shared_sentences_sorted_by_student_count_desc():
+    common = "모둠 활동에서 자료 조사를 맡아 근거를 정리함"
+    items = [
+        ("학생A", f"{common}. {SHARED}."),
+        ("학생B", f"{common}. {SHARED}."),
+        ("학생C", f"{common}."),
+    ]
+    result = find_shared_sentences(items)
+    assert [len(names) for _, names in result] == [3, 2]
+    assert common in result[0][0]

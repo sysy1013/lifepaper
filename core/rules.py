@@ -182,6 +182,35 @@ def _normalize_for_similarity(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+_SENTENCE_SPLIT_RE = re.compile(r"[.!?\n]+")
+
+
+def find_shared_sentences(
+    items: list[tuple[str, str]], min_chars: int = 12, min_students: int = 2
+) -> list[tuple[str, list[str]]]:
+    """여러 학생에게 공통으로 나타나는 문장을 찾는다.
+
+    (학생명, 텍스트) 목록에서 문장을 나누고, 같은 문장을 쓴 학생이
+    min_students명 이상인 경우만 (문장, 학생명 목록)으로 돌려준다.
+    """
+    groups: dict[str, tuple[str, list[str]]] = {}
+    for name, text in items:
+        seen_here: set[str] = set()
+        for raw in _SENTENCE_SPLIT_RE.split(text or ""):
+            sentence = _normalize_for_similarity(raw)
+            if len(sentence) < min_chars or sentence in seen_here:
+                continue
+            seen_here.add(sentence)
+            # 표시용 대표 문장은 처음 등장한 원문(앞뒤 공백만 제거)을 쓴다.
+            groups.setdefault(sentence, (raw.strip(), []))[1].append(name)
+    shared = [
+        (repr_text, names)
+        for repr_text, names in groups.values()
+        if len(names) >= min_students
+    ]
+    return sorted(shared, key=lambda p: (-len(p[1]), -len(p[0])))
+
+
 def find_similar_pairs(
     items: list[tuple[str, str]], threshold: float = SIMILARITY_THRESHOLD
 ) -> list[tuple[str, str, float]]:

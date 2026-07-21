@@ -72,6 +72,7 @@ from core.project import replace_in_entries
 from core.rules import (
     NEIS_LIMITS,
     filter_ignored,
+    find_shared_sentences,
     find_similar_pairs,
     neis_bytes,
     parse_custom_words,
@@ -251,6 +252,36 @@ def render_similarity_check(items: list[tuple[str, str]]) -> None:
         st.dataframe(sim_df, use_container_width=True, hide_index=True)
     else:
         st.success("✅ 학생 간 유사도 검사: 유사한 쌍이 발견되지 않았습니다.")
+
+
+def render_shared_sentence_check(items: list[tuple[str, str]]) -> None:
+    """여러 학생에게 반복된 문장(문장 단위 중복)을 표시한다. API 호출 없음."""
+    if len(items) < 2:
+        return
+    st.markdown("**🔁 여러 학생에게 반복된 문장**")
+    shared = find_shared_sentences(items)
+    if not shared:
+        st.success("✅ 여러 학생에게 반복된 문장이 없습니다.")
+        return
+    st.warning(f"⚠️ **반복된 문장 {len(shared)}건**이 발견되었습니다.")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "반복 문장": sentence,
+                    "학생 수": len(names),
+                    "학생": ", ".join(names),
+                }
+                for sentence, names in shared
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(
+        "같은 문장이 여러 학생에게 들어가면 감사 지적 대상이 될 수 있습니다. "
+        "학생별 활동 내용으로 개별화해 주세요."
+    )
 
 
 # ──────────────────────────────────────────────
@@ -489,6 +520,90 @@ def render_length_adjuster(
             f"현재 **{cur_chars:,}자** ({cur_bytes:,} byte) → 목표 {int(target):,}자. "
             "조절하면 본문이 새 버전으로 교체됩니다 (사실 추가 없이 줄이기/풀어쓰기)."
         )
+
+
+# ──────────────────────────────────────────────
+# 분량 초과 학생 일괄 맞추기 (일괄 후처리)
+# ──────────────────────────────────────────────
+def over_limit_entries(
+    entries: list[dict], source, limit: int, use_bytes: bool
+) -> list[dict]:
+    """현재 분량 기준(글자/바이트)으로 제한을 넘는 항목만 고른다. 제한 없음이면 빈 목록."""
+    if not limit:
+        return []
+    eff_limit = limit * 3 if use_bytes else limit
+    over = []
+    for b in entries:
+        text = source(b)
+        if not text:
+            continue
+        count = neis_bytes(text) if use_bytes else len(text)
+        if count > eff_limit:
+            over.append(b)
+    return over
+
+
+def render_bulk_length_fit(
+    entries: list[dict],
+    source,
+    field: str,
+    api_key: str,
+    limit: int,
+    use_bytes: bool,
+    widget_key: str,
+    char_target: int | None = None,
+    container=None,
+) -> None:
+    """분량 초과 학생의 본문을 병렬로 목표 분량에 맞춘다 (결과는 field 키에 저장).
+
+    char_target이 주어지면 그 글자 수를, 없으면 NEIS 제한(바이트 기준일 때는
+    단일 학생 분량 조절과 동일하게 글자당 바이트 비율로 환산한 값)을 목표로 한다.
+    """
+    box = container if container is not None else st
+    over = over_limit_entries(entries, source, limit, use_bytes)
+    if not box.button(
+        f"📏 분량 초과 학생 일괄 맞추기 ({len(over)}명)",
+        key=f"lenfit_{widget_key}",
+        use_container_width=True,
+        disabled=not over,
+    ):
+        return
+    if not api_key.strip():
+        st.warning("⚠️ 서버에 Gemini API Key가 설정되지 않아 실행할 수 없습니다.")
+        return
+
+    fit_map, fit_auto = masked_ctx([source(b) for b in over])
+    render_auto_mask_note(fit_auto)
+
+    def _target_for(text: str) -> int:
+        if char_target:
+            return int(char_target)
+        if use_bytes:
+            # Gemini는 바이트를 직접 세지 못하므로 글자당 바이트 비율로 환산
+            return max(
+                int(round(limit * 3 * len(text) / max(neis_bytes(text), 1))), 50
+            )
+        return int(limit)
+
+    def _fit_job(idx: int) -> tuple[str, str]:
+        text = source(over[idx])
+        try:
+            adjusted = adjust_length_with_gemini(
+                apply_mask(text, fit_map), _target_for(text), api_key
+            )
+            return remove_mask(adjusted, fit_map), ""
+        except Exception as e:
+            return "", str(e)
+
+    outs = run_parallel(len(over), _fit_job, "분량 맞추는 중…")
+    done = 0
+    for b, (adjusted, err) in zip(over, outs):
+        b["length_error"] = err
+        if adjusted:
+            b[field] = adjusted
+            done += 1
+    record_history(f"분량 초과 일괄 맞추기 {done}/{len(over)}명", "")
+    st.rerun()
 
 
 # ──────────────────────────────────────────────
@@ -1376,7 +1491,22 @@ if mode == "🔍 기재 금지 표현 검토":
             "결과는 요약표와 학생별 상세에 반영됩니다."
         )
         targets = [b for b in ok if filter_ignored(b["findings"], ignored_now)]
-        col_rev, col_q, col_p = st.columns(3)
+        col_rev, col_q, col_p, col_len = st.columns(4)
+
+        # 내보내기와 동일한 기준(수정본 우선, 없으면 원문)으로 분량 초과를 판정한다.
+        def export_text(b: dict) -> str:
+            return b.get("revised") or b.get("text", "")
+
+        render_bulk_length_fit(
+            ok,
+            export_text,
+            "revised",
+            api_key,
+            neis_limit,
+            use_bytes,
+            "batch_review",
+            container=col_len,
+        )
 
         if col_rev.button(
             f"✏️ 전체 수정본 생성 ({len(targets)}명)",
@@ -1453,6 +1583,7 @@ if mode == "🔍 기재 금지 표현 검토":
                 ("수정본", "revised_error"),
                 ("품질", "quality_error"),
                 ("오탈자", "proofread_error"),
+                ("분량", "length_error"),
             )
             if b.get(key)
         ]
@@ -1495,6 +1626,7 @@ if mode == "🔍 기재 금지 표현 검토":
         # 학생 간 유사도 검사
         st.subheader("👥 학생 간 유사도 검사")
         render_similarity_check([(b["name"], b["text"]) for b in ok])
+        render_shared_sentence_check([(b["name"], b["text"]) for b in ok])
 
         # 학생별 상세
         st.subheader("📄 학생별 상세 결과")
@@ -2167,7 +2299,20 @@ else:
             + [subject, major]
         )
         render_auto_mask_note(dpost_auto)
-        col_q, col_p = st.columns(2)
+        col_q, col_p, col_len = st.columns(3)
+
+        render_bulk_length_fit(
+            ok,
+            lambda b: b.get("draft", ""),
+            "draft",
+            api_key,
+            neis_limit,
+            use_bytes,
+            "batch_drafts",
+            char_target=target_len,
+            container=col_len,
+        )
+
         if col_q.button(f"🏅 전체 품질 진단 ({len(ok)}명)", use_container_width=True):
             def _dq_job(idx: int) -> tuple[dict | None, str]:
                 b = ok[idx]
@@ -2213,7 +2358,11 @@ else:
         draft_post_errors = [
             f"{b['name']}({kind}): {b.get(key)}"
             for b in ok
-            for kind, key in (("품질", "quality_error"), ("오탈자", "proofread_error"))
+            for kind, key in (
+                ("품질", "quality_error"),
+                ("오탈자", "proofread_error"),
+                ("분량", "length_error"),
+            )
             if b.get(key)
         ]
         if draft_post_errors:
@@ -2225,6 +2374,7 @@ else:
         # 초안 간 유사도 검사 (같은 수행평가 기반이라 문장이 겹치기 쉬움)
         st.subheader("👥 초안 간 유사도 검사")
         render_similarity_check([(b["name"], b["draft"]) for b in ok])
+        render_shared_sentence_check([(b["name"], b["draft"]) for b in ok])
 
         st.subheader("📄 학생별 초안")
         for b in ok:
