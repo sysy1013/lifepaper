@@ -80,6 +80,10 @@ from core.rules import (
     style_check,
 )
 from core.theme import apply_theme, render_brand_header
+from core.undo import UNDO_DEPTH  # noqa: F401  (되돌리기 스택 최대 깊이)
+from core.undo import has_undo as _has_undo
+from core.undo import pop_undo as _pop_undo
+from core.undo import push_undo as _push_undo
 
 # ──────────────────────────────────────────────
 # 페이지 기본 설정
@@ -107,6 +111,50 @@ def record_history(label: str, content: str) -> None:
         }
     )
     del hist[:-20]
+
+
+# ──────────────────────────────────────────────
+# 되돌리기(undo) — 덮어쓰기 직전 값을 스택에 보관
+# ──────────────────────────────────────────────
+def push_undo(state_key: str, value) -> None:
+    """state_key의 현재 값을 되돌리기 스택에 넣는다 (최대 UNDO_DEPTH개)."""
+    _push_undo(st.session_state, state_key, value)
+
+
+def pop_undo(state_key: str):
+    """가장 최근 값을 꺼내 반환한다. 없으면 None."""
+    return _pop_undo(st.session_state, state_key)
+
+
+def has_undo(state_key: str) -> bool:
+    """되돌릴 이전 값이 있으면 True."""
+    return _has_undo(st.session_state, state_key)
+
+
+def restore_undo(state_key: str, label: str) -> None:
+    """되돌리기 버튼 on_click 콜백: 이전 값을 복원하고 이력에 남긴다."""
+    prev = pop_undo(state_key)
+    if prev is None:
+        return
+    st.session_state[state_key] = prev
+    record_history(f"되돌리기: {label}", "")
+
+
+def render_undo_button(
+    state_key: str, label: str, widget_key: str, container=None
+) -> None:
+    """되돌릴 값이 있을 때만 '↩️ 되돌리기' 버튼을 표시한다."""
+    if not has_undo(state_key):
+        return
+    target = container if container is not None else st
+    if target.button(
+        "↩️ 되돌리기",
+        key=widget_key,
+        help=f"직전 {label}(으)로 되돌립니다.",
+        on_click=restore_undo,
+        args=(state_key, label),
+    ):
+        st.rerun()
 
 
 # 세션 전체 삭제 시에도 남겨 둘 키 (로그인 상태는 유지한다)
@@ -429,6 +477,7 @@ def render_proofread_block(
                 key=f"apply_{state_key}",
                 use_container_width=True,
             ):
+                push_undo(apply_to_key, st.session_state.get(apply_to_key, text))
                 st.session_state[apply_to_key] = corrected
                 record_history("오탈자 교정 반영", corrected)
                 st.session_state.pop(state_key, None)
@@ -503,6 +552,7 @@ def render_length_adjuster(
                     adjusted = adjust_length_with_gemini(
                         apply_mask(text, mask_map), char_target, api_key
                     )
+                    push_undo(state_key, text)
                     st.session_state[state_key] = remove_mask(adjusted, mask_map)
                     for k in clear_keys:
                         st.session_state.pop(k, None)
@@ -1274,7 +1324,11 @@ if mode == "🔍 기재 금지 표현 검토":
     review = st.session_state.get("review_result")
     if review:
         st.divider()
-        st.subheader("2️⃣ 위반 표현 하이라이트 및 분량 검사")
+        head_l, head_r = st.columns([4, 1], vertical_alignment="bottom")
+        head_l.subheader("2️⃣ 위반 표현 하이라이트 및 분량 검사")
+        render_undo_button(
+            "review_result", "재검토 이전 결과", "undo_review", container=head_r
+        )
 
         # 이 검토 본문에 대한 확장 마스킹 맵 (수정본·품질·오탈자 모두 이 맵을 공유)
         rev_map, rev_auto = masked_ctx([review["text"], major])
@@ -1296,6 +1350,9 @@ if mode == "🔍 기재 금지 표현 검토":
                             apply_mask(major, rev_map),
                             api_key,
                         )
+                        prev_revised = st.session_state.get("revised_text")
+                        if prev_revised:
+                            push_undo("revised_text", prev_revised)
                         st.session_state["revised_text"] = remove_mask(
                             revised, rev_map
                         )
@@ -1306,6 +1363,7 @@ if mode == "🔍 기재 금지 표현 검토":
             revised = st.session_state.get("revised_text", "")
             if revised:
                 st.text_area("수정본 (복사해서 사용하세요)", value=revised, height=250)
+                render_undo_button("revised_text", "수정본", "undo_revised")
                 render_length_metrics(revised, neis_limit)
                 # 수정본에도 개인정보가 남아 있을 수 있으므로 원문+수정본으로 다시 확장
                 rev2_map, rev2_auto = masked_ctx([review["text"], revised, major])
@@ -1340,6 +1398,7 @@ if mode == "🔍 기재 금지 표현 검토":
                             new_findings = review_text_masked(
                                 revised, major, api_key, custom_words, rev2_map
                             )
+                            push_undo("review_result", dict(review))
                             st.session_state["review_result"] = {
                                 "text": revised,
                                 "findings": new_findings,
@@ -2181,6 +2240,7 @@ else:
         st.subheader("2️⃣ 생성된 세특 초안")
 
         st.text_area("초안 (복사해서 사용하세요)", value=draft, height=280)
+        render_undo_button("draft_text", "초안", "undo_draft")
         render_length_metrics(draft, neis_limit)
         # 이 초안에 대한 확장 마스킹 맵 (분량 조절·품질·오탈자가 공유)
         draft_map, draft_auto = masked_ctx([draft, subject, major])
@@ -2235,6 +2295,7 @@ else:
                             api_key,
                             context=st.session_state.get("draft_context"),
                         )
+                        push_undo("draft_text", draft)
                         st.session_state["draft_text"] = remove_mask(
                             refined, refine_map
                         )
