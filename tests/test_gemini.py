@@ -10,11 +10,16 @@ from core.gemini import (
     _FALLBACK_ORDER,
     _gemini_json,
     _gemini_text,
+    _make_model,
     _strip_code_fence,
+    analyze_with_gemini,
+    assess_quality_with_gemini,
     build_draft_prompt,
     category_for_neis_item,
+    generate_draft_with_gemini,
     get_active_model,
     get_fallback_models,
+    proofread_with_gemini,
     quality_avg,
     rewrite_with_gemini,
     set_active_model,
@@ -301,6 +306,98 @@ def test_rewrite_single_pass_when_already_clean(monkeypatch):
 
     assert model.calls == 1
     assert result == "성실하게 탐구 활동에 참여함."
+
+
+# ── thinking(사고) 설정 ──
+def test_make_model_thinking_disabled_sets_zero_budget():
+    model = _make_model("fake-key", "sys", temperature=0.2, thinking=False)
+    assert model._config.thinking_config is not None
+    assert model._config.thinking_config.thinking_budget == 0
+
+
+def test_make_model_default_has_no_thinking_config():
+    model = _make_model("fake-key", "sys", temperature=0.2)
+    assert model._config.thinking_config is None
+    assert "thinking_config" not in model._config_kwargs
+
+
+class _RecordingMakeModel:
+    """_make_model 대체용. thinking kwarg를 기록하고 스텁 모델을 돌려준다."""
+
+    def __init__(self, behaviors):
+        self.behaviors = behaviors
+        self.thinking = None
+
+    def __call__(self, *a, thinking=True, **k):
+        self.thinking = thinking
+        return _StubModel(self.behaviors)
+
+
+@pytest.mark.parametrize(
+    "call, behaviors, expected_thinking",
+    [
+        (lambda: analyze_with_gemini("본문", "전공", "key"), ["[]"], False),
+        (lambda: proofread_with_gemini("본문", "key"), ["[]"], False),
+        (
+            lambda: generate_draft_with_gemini("정보", "전공", "수행", "", 500, "key"),
+            ["초안 본문임."],
+            True,
+        ),
+        (
+            lambda: assess_quality_with_gemini("본문", "전공", "key"),
+            ['{"scores": [{"criterion": "구체성", "score": 4}]}'],
+            True,
+        ),
+    ],
+)
+def test_thinking_flag_per_task(monkeypatch, call, behaviors, expected_thinking):
+    recorder = _RecordingMakeModel(behaviors)
+    monkeypatch.setattr("core.gemini._make_model", recorder)
+    call()
+    assert recorder.thinking is expected_thinking
+
+
+class _StubModels:
+    def __init__(self, behaviors):
+        self.behaviors = list(behaviors)
+        self.calls = 0
+        self.configs = []
+
+    def generate_content(self, model=None, contents=None, config=None):
+        b = self.behaviors[self.calls]
+        self.calls += 1
+        self.configs.append(config)
+        if isinstance(b, Exception):
+            raise b
+        return _Resp(b)
+
+
+class _StubClient:
+    def __init__(self, behaviors):
+        self.models = _StubModels(behaviors)
+
+
+def test_generate_content_retries_without_thinking_config_on_thinking_error():
+    model = _make_model("fake-key", "sys", temperature=0.2, thinking=False)
+    client = _StubClient(
+        [ValueError("thinking_budget is not supported"), "정상 응답"]
+    )
+    model._client = client
+
+    assert model.generate_content("p").text == "정상 응답"
+    assert client.models.calls == 2
+    assert client.models.configs[0].thinking_config.thinking_budget == 0
+    assert client.models.configs[1].thinking_config is None
+
+
+def test_generate_content_does_not_swallow_other_errors():
+    model = _make_model("fake-key", "sys", temperature=0.2, thinking=False)
+    client = _StubClient([ValueError("401 unauthorized"), "should-not-reach"])
+    model._client = client
+
+    with pytest.raises(ValueError, match="401"):
+        model.generate_content("p")
+    assert client.models.calls == 1
 
 
 # ── _strip_code_fence ──
