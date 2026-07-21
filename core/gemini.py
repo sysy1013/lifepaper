@@ -13,12 +13,12 @@ from core.masking import apply_mask, remove_mask
 from core.rules import rule_based_filter
 
 MODEL_CHOICES = {
-    "품질 우선 (2.5 Pro — 정밀·느림)": "gemini-2.5-pro",
-    "속도 우선 (2.5 Flash — 빠름)": "gemini-2.5-flash",
-    "최신 실험 (3.0 Flash Preview — 빠르고 우수, 변경 가능성)": "gemini-3-flash-preview",
+    "균형 (3.0 Flash — 권장)": "gemini-3-flash-preview",
+    "품질 우선 (3.1 Pro — 정밀·느림)": "gemini-3.1-pro-preview",
+    "속도 우선 (Flash Lite — 최속)": "gemini-flash-lite-latest",
 }
-DEFAULT_MODEL = "gemini-2.5-pro"
-_FALLBACK_ORDER = ("gemini-2.5-flash", "gemini-flash-lite-latest", "gemini-2.5-pro")
+DEFAULT_MODEL = "gemini-3-flash-preview"
+_FALLBACK_ORDER = ("gemini-3-flash-preview", "gemini-flash-latest", "gemini-flash-lite-latest")
 
 _active_model = DEFAULT_MODEL
 

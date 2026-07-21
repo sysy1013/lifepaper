@@ -7,6 +7,7 @@ from core.gemini import (
     CATEGORY_GUIDES,
     DEFAULT_MODEL,
     MODEL_CHOICES,
+    _FALLBACK_ORDER,
     _gemini_json,
     _gemini_text,
     _strip_code_fence,
@@ -57,12 +58,13 @@ def test_gemini_text_retries_on_retryable_then_succeeds():
 
 
 def test_gemini_text_gives_up_after_max_attempts():
-    # 마지막 재시도 실패 후 폴백 체인(2개)을 모두 시도하지만 전부 503으로 실패한다
-    # → 총 3(주 모델) + 2(폴백) = 5회 호출.
-    model = _StubModel([Exception("503 unavailable")] * 5)
+    # 마지막 재시도 실패 후 폴백 체인을 모두 시도하지만 전부 503으로 실패한다
+    # → 총 3(주 모델) + len(fallback)회 호출.
+    expected = 3 + len(get_fallback_models())
+    model = _StubModel([Exception("503 unavailable")] * expected)
     with pytest.raises(Exception):
         _gemini_text(model, "p", max_attempts=3)
-    assert model.calls == 5
+    assert model.calls == expected
 
 
 def test_gemini_text_no_retry_on_non_retryable():
@@ -116,6 +118,35 @@ def test_gemini_text_fallback_also_fails_raises_original_error():
         _gemini_text(model, "p", max_attempts=3)
     assert model.calls == 3 + len(fallback)
     assert model.model_names[-1] == fallback[-1]
+
+
+# ── 모델 상수 ──
+def test_default_model_is_a_valid_choice():
+    assert DEFAULT_MODEL in MODEL_CHOICES.values()
+
+
+def test_model_choices_values_are_non_empty():
+    assert MODEL_CHOICES
+    for label, model_name in MODEL_CHOICES.items():
+        assert label.strip()
+        assert isinstance(model_name, str) and model_name.strip()
+
+
+def test_fallback_order_entries_are_non_empty_and_unique():
+    assert _FALLBACK_ORDER
+    assert all(isinstance(m, str) and m.strip() for m in _FALLBACK_ORDER)
+    assert len(set(_FALLBACK_ORDER)) == len(_FALLBACK_ORDER)
+
+
+def test_default_model_fallback_chain_has_two_entries():
+    # 기본 모델 활성 상태에서 폴백은 자기 자신을 제외한 나머지다.
+    try:
+        set_active_model(DEFAULT_MODEL)
+        assert get_fallback_models() == tuple(
+            m for m in _FALLBACK_ORDER if m != DEFAULT_MODEL
+        )
+    finally:
+        set_active_model(DEFAULT_MODEL)
 
 
 # ── 활성 모델 선택 ──

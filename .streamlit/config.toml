@@ -1,0 +1,8 @@
+# 생기부 도우미 — macOS 스타일 디자인 시스템 테마
+# 시스템 블루 액센트가 라디오·체크박스·슬라이더·진행바에 네이티브로 반영된다.
+[theme]
+primaryColor = "#0D6FFF"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F5F7"
+textColor = "#1A1A1A"
+font = "sans serif"

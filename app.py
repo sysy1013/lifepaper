@@ -77,6 +77,7 @@ from core.rules import (
     rule_based_filter,
     style_check,
 )
+from core.theme import apply_theme, render_brand_header
 
 # ──────────────────────────────────────────────
 # 페이지 기본 설정
@@ -86,6 +87,8 @@ st.set_page_config(
     page_icon="📋",
     layout="wide",
 )
+
+apply_theme()
 
 # 일괄 처리 동시 호출 수 (무료 쿼터에서도 429는 재시도로 흡수)
 BATCH_WORKERS = 4
@@ -701,7 +704,7 @@ def check_password() -> bool:
     if st.session_state.get("auth_ok"):
         return True
 
-    st.title("📋 생기부 도우미")
+    render_brand_header()
     st.caption("본 도구는 승인된 사용자 전용입니다. 접근 암호를 입력해 주세요.")
     pw = st.text_input("접근 암호", type="password", key="app_password_input")
     if pw:
@@ -724,7 +727,7 @@ st.session_state.setdefault("ignored_words", [])
 # ──────────────────────────────────────────────
 # UI 구성
 # ──────────────────────────────────────────────
-st.title("📋 생기부 도우미")
+render_brand_header()
 st.caption(
     "교육부 「학교생활기록부 기재요령」 기준으로 기재 금지 표현을 검출·수정하고, "
     "수행평가 자료와 학생 자기평가서를 활용해 세특 초안을 작성·진단합니다."
@@ -782,11 +785,14 @@ with st.sidebar:
         help="NEIS 바이트 기준은 글자 수 제한을 자→바이트(×3)로 환산해 초과 여부를 판정합니다.",
     ).startswith("NEIS 바이트")
 
+    # 모델 라인업이 바뀌면 세션에 남은 옛 라벨이 selectbox 옵션과 어긋나 오류가 난다.
+    if st.session_state.get("model_choice") not in MODEL_CHOICES:
+        st.session_state.pop("model_choice", None)
     model_choice = st.selectbox(
         "AI 모델",
         list(MODEL_CHOICES.keys()),
         key="model_choice",
-        help="품질 우선은 정밀하지만 느립니다. 속도 우선은 빠릅니다. 최신 실험은 미리보기 모델로 성능·속도가 좋지만 구글 사정으로 바뀔 수 있습니다.",
+        help="균형(3.0 Flash)이 품질·속도 모두 무난하여 기본값입니다. 품질 우선(3.1 Pro)은 더 정밀하지만 2배 이상 느립니다. 속도 우선(Flash Lite)은 가장 빠릅니다.",
     )
     set_active_model(MODEL_CHOICES[model_choice])
 
