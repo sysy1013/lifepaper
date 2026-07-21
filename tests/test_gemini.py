@@ -223,8 +223,7 @@ def test_build_draft_prompt_self_eval_branches():
 # ── NEIS 항목 → 작성 카테고리 매핑 ──
 def test_category_for_neis_item_all_keys_resolve():
     expected = {
-        "과목별 세특 (500자)": "세특",
-        "개인별 세특 (500자)": "세특",
+        "세특 (과목별·개인별, 500자)": "세특",
         "자율·자치활동 (500자)": "자율·자치활동",
         "동아리활동 (500자)": "동아리활동",
         "진로활동 (700자)": "진로활동",

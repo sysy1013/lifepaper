@@ -51,6 +51,7 @@ from core.masking import (
     apply_mask,
     build_mask_map,
     extend_mask_map,
+    mask_findings,
     remove_mask,
     remove_mask_deep,
     suggest_mask_candidates,
@@ -64,12 +65,7 @@ from core.parsing import (
     read_uploaded_file,
     unique_names,
 )
-from core.project import (
-    PROJECT_KEYS,
-    deserialize_project,
-    replace_in_entries,
-    serialize_project,
-)
+from core.project import replace_in_entries
 from core.rules import (
     NEIS_LIMITS,
     filter_ignored,
@@ -109,34 +105,20 @@ def record_history(label: str, content: str) -> None:
     del hist[:-20]
 
 
-def export_project() -> str:
-    """현재 세션의 작업 상태를 프로젝트 JSON 문자열로 직렬화한다."""
-    data = {k: st.session_state.get(k) for k in PROJECT_KEYS if k in st.session_state}
-    return serialize_project(data)
+# 세션 전체 삭제 시에도 남겨 둘 키 (로그인 상태는 유지한다)
+CLEAR_KEEP_KEYS = frozenset({"auth_ok"})
 
 
-def import_project(raw: bytes) -> str:
-    """프로젝트 JSON을 검증해 세션에 복원한다. 성공 시 '' 또는 오류 메시지 반환.
+def clear_all_session() -> None:
+    """입력·결과 등 앱 세션 상태를 모두 지운다 (로그인 상태만 유지).
 
-    on_click 콜백에서 호출되므로(콜백은 스크립트 재실행 전에 실행된다) 위젯 key인
-    'mask_words_raw'도 위젯 생성 전에 안전하게 되돌릴 수 있다.
+    on_click 콜백에서 호출되므로(콜백은 위젯 생성 전에 실행된다) 위젯 key까지
+    안전하게 삭제할 수 있어 입력란도 함께 초기화된다.
     """
-    data, err = deserialize_project(raw)
-    if err:
-        return err
-    for k, v in data.items():
-        st.session_state[k] = v
-    return ""
-
-
-def _restore_project() -> None:
-    """복원 실행 버튼 콜백 — 업로드된 파일을 읽어 세션에 복원한다."""
-    up = st.session_state.get("proj_file")
-    if up is None:
-        st.session_state["proj_msg"] = "❌ 불러올 프로젝트 파일을 먼저 선택해 주세요."
-        return
-    err = import_project(up.getvalue())
-    st.session_state["proj_msg"] = err if err else "✅ 프로젝트를 복원했습니다."
+    for k in list(st.session_state.keys()):
+        if k not in CLEAR_KEEP_KEYS:
+            del st.session_state[k]
+    st.rerun()
 
 
 def render_replace_control(state_key: str, field: str, widget_key: str) -> None:
@@ -285,8 +267,10 @@ def render_quality_block(
 ) -> None:
     """품질 진단 실행 버튼 + 결과 표시 블록.
 
-    text는 이미 마스킹된 상태로 받는다. 루브릭 코멘트가 마스킹 토큰을 인용할 수
-    있으므로 mask_map이 주어지면 결과 전체를 원래 표현으로 복원해 보여준다.
+    text는 이미 마스킹된 상태로 받는다. major(희망 진로/학과)는 교사 자유 입력이라
+    이름이 섞일 수 있으므로 이 함수 안에서 마스킹해 전송한다. 루브릭 코멘트가
+    마스킹 토큰을 인용할 수 있으므로 mask_map이 주어지면 결과 전체를 원래
+    표현으로 복원해 보여준다.
     """
     st.subheader("🏅 세특 품질 진단 (수석교사 루브릭)")
     st.caption("구체성 · 개별성 · 탐구 과정 · 성장·변화 · 진로 연계 5개 기준으로 평가합니다.")
@@ -296,7 +280,9 @@ def render_quality_block(
         else:
             with st.spinner(f"수석교사 루브릭 평가 중… ({get_active_model()})"):
                 try:
-                    result = assess_quality_with_gemini(text, major, api_key)
+                    result = assess_quality_with_gemini(
+                        text, apply_mask(major, mask_map or []), api_key
+                    )
                     st.session_state[state_key] = remove_mask_deep(
                         result, mask_map or []
                     )
@@ -651,16 +637,17 @@ def render_guide() -> None:
         "| **사용자 정의 금칙어** | 학교명 등 반드시 걸러야 할 단어를 규칙 검출에 추가 | 학교·학원명 차단 |\n"
         "| **작업 이력** | 이번 세션 결과를 시각과 함께 기록 · TXT 다운로드 | 이전 결과 되찾기 |\n"
         "| **오탐 무시 목록** | 오탐으로 표시한 검출어를 이후 결과에서 제외 | 반복되는 오탐 정리 |\n"
-        "| **프로젝트 저장/복원** | 세션 작업 상태를 JSON으로 저장·복원 | 작업 중단 후 이어하기 |"
+        "| **🗑️ 작업 내용 모두 지우기** | 이 브라우저 세션에 남은 입력·결과를 한 번에 삭제 | 공용 PC 사용 후 |"
     )
 
     # ── (d) 자주 묻는 질문 ──
     st.subheader("④ 자주 묻는 질문")
     with st.expander("결과가 사라졌어요"):
         st.markdown(
-            "새로고침·재실행 시 화면 결과는 초기화될 수 있습니다. "
-            "사이드바 **💾 프로젝트 저장(JSON)** 으로 작업 상태를 파일로 보관했다가 "
-            "**📂 복원 실행**으로 되돌릴 수 있고, **🕘 작업 이력**에서 이전 결과 TXT를 다시 받을 수 있습니다."
+            "결과는 **지금 사용 중인 브라우저 세션에만** 남고 서버에는 저장되지 않습니다. "
+            "새로고침·재실행 시 화면 결과는 초기화될 수 있으니, 필요한 결과는 그때그때 "
+            "TXT·CSV·엑셀로 내려받아 두세요(**🕘 작업 이력**에서도 이전 결과 TXT를 다시 받을 수 있습니다). "
+            "다른 사람에게 컴퓨터를 넘길 때는 사이드바 **🗑️ 작업 내용 모두 지우기**를 눌러 주세요."
         )
     with st.expander("학생 이름이 외부로 전송되나요?"):
         st.markdown(
@@ -791,9 +778,13 @@ with st.sidebar:
         help="검토 시 대체 표현 추천, 초안 작성 시 진로 연계 서술에 활용됩니다.",
     )
 
+    # 항목 라벨이 바뀌면 세션에 남은 옛 라벨이 selectbox 옵션과 어긋나 오류가 난다.
+    if st.session_state.get("neis_item") not in NEIS_LIMITS:
+        st.session_state.pop("neis_item", None)
     neis_item = st.selectbox(
         "생기부 항목 (NEIS 글자 수 제한)",
         list(NEIS_LIMITS.keys()),
+        key="neis_item",
         help="선택한 항목의 글자 수 제한을 기준으로 분량 초과 여부를 검사합니다.",
     )
     neis_limit = NEIS_LIMITS[neis_item]
@@ -871,35 +862,18 @@ with st.sidebar:
             st.session_state["ignored_words"] = []
             st.rerun()
 
-    # 프로젝트 저장/복원 — 세션 작업 상태를 JSON 파일로 내보내고 되돌린다.
+    # 개인정보 흔적 남기지 않기 — 세션 상태 전체 삭제
     st.divider()
-    st.markdown("**💾 프로젝트**")
     st.caption(
-        "⚠️ 저장 파일에는 **학생 정보가 포함**됩니다. 외부에 올리지 말고 "
-        "교사 PC에만 보관하세요."
+        "🔒 입력한 내용과 결과는 **이 브라우저 세션에만** 잠시 보관되며 "
+        "서버에 저장되지 않습니다. 공용 PC라면 사용 후 아래 버튼으로 지워주세요."
     )
-    st.download_button(
-        "📥 프로젝트 저장 (JSON)",
-        data=export_project(),
-        file_name="생기부_프로젝트.json",
-        mime="application/json",
-        key="proj_dl",
-        use_container_width=True,
-    )
-    st.file_uploader("프로젝트 불러오기", type=["json"], key="proj_file")
     st.button(
-        "📂 복원 실행",
-        key="proj_restore",
+        "🗑️ 작업 내용 모두 지우기",
+        key="clear_all",
         use_container_width=True,
-        on_click=_restore_project,
+        on_click=clear_all_session,
     )
-    proj_msg = st.session_state.get("proj_msg")
-    if proj_msg:
-        if proj_msg.startswith("✅"):
-            st.success(proj_msg)
-        else:
-            st.error(proj_msg)
-        st.session_state.pop("proj_msg", None)
 
 
 # ── 자동 마스킹 안전망 ──
@@ -1054,7 +1028,7 @@ if mode == "🔍 기재 금지 표현 검토":
 
             inputs = [(name, text, "") for name, text in entries]
             # 전송 직전, 실제 본문에서 개인정보를 추가 탐지해 확장 맵으로 일괄 전송한다.
-            batch_map, _ = masked_ctx([t for _, t, _ in inputs])
+            batch_map, _ = masked_ctx([t for _, t, _ in inputs] + [major])
             st.session_state["batch_review"] = run_batch_review_pipeline(
                 inputs, major, api_key, custom_words, batch_map
             )
@@ -1076,7 +1050,7 @@ if mode == "🔍 기재 금지 표현 검토":
                 except Exception as e:
                     inputs.append((stem, "", str(e)))
 
-            batch_map, _ = masked_ctx([t for _, t, _ in inputs])
+            batch_map, _ = masked_ctx([t for _, t, _ in inputs] + [major])
             st.session_state["batch_review"] = run_batch_review_pipeline(
                 inputs, major, api_key, custom_words, batch_map
             )
@@ -1092,7 +1066,7 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state.pop("revised_text", None)
             st.session_state.pop("proofread_review", None)
 
-            single_map, _ = masked_ctx([input_text])
+            single_map, _ = masked_ctx([input_text, major])
             with st.spinner(f"규칙 기반 필터링 + Gemini 문맥 심사 중… ({get_active_model()})"):
                 try:
                     findings = review_text_masked(
@@ -1111,7 +1085,7 @@ if mode == "🔍 기재 금지 표현 검토":
     # ── 검토 실행 전에도 입력 텍스트만으로 오탈자 검사 가능 ──
     if input_text.strip() and not st.session_state.get("review_result"):
         st.divider()
-        pre_map, pre_auto = masked_ctx([input_text])
+        pre_map, pre_auto = masked_ctx([input_text, major])
         render_auto_mask_note(pre_auto)
         render_proofread_block(input_text, api_key, pre_map, "proofread_review")
 
@@ -1122,7 +1096,7 @@ if mode == "🔍 기재 금지 표현 검토":
         st.subheader("2️⃣ 위반 표현 하이라이트 및 분량 검사")
 
         # 이 검토 본문에 대한 확장 마스킹 맵 (수정본·품질·오탈자 모두 이 맵을 공유)
-        rev_map, rev_auto = masked_ctx([review["text"]])
+        rev_map, rev_auto = masked_ctx([review["text"], major])
         render_auto_mask_note(rev_auto)
 
         render_length_metrics(review["text"], neis_limit)
@@ -1135,14 +1109,10 @@ if mode == "🔍 기재 금지 표현 검토":
             if st.button("✏️ 검토 결과를 반영한 수정본 생성", use_container_width=True):
                 with st.spinner(f"수정본 생성 중… ({get_active_model()})"):
                     try:
-                        masked_findings = [
-                            {**f, "word": apply_mask(f["word"], rev_map)}
-                            for f in findings
-                        ]
                         revised = rewrite_with_gemini(
                             apply_mask(review["text"], rev_map),
-                            masked_findings,
-                            major,
+                            mask_findings(findings, rev_map),
+                            apply_mask(major, rev_map),
                             api_key,
                         )
                         st.session_state["revised_text"] = remove_mask(
@@ -1157,7 +1127,7 @@ if mode == "🔍 기재 금지 표현 검토":
                 st.text_area("수정본 (복사해서 사용하세요)", value=revised, height=250)
                 render_length_metrics(revised, neis_limit)
                 # 수정본에도 개인정보가 남아 있을 수 있으므로 원문+수정본으로 다시 확장
-                rev2_map, rev2_auto = masked_ctx([review["text"], revised])
+                rev2_map, rev2_auto = masked_ctx([review["text"], revised, major])
                 render_auto_mask_note(rev2_auto)
                 render_length_adjuster(
                     "revised_text", api_key, rev2_map, neis_limit, "revised"
@@ -1235,7 +1205,7 @@ if mode == "🔍 기재 금지 표현 검토":
         )
 
         # 일괄 후처리(수정본·품질·오탈자)에서 공유할 확장 마스킹 맵
-        bpost_map, bpost_auto = masked_ctx([b["text"] for b in ok])
+        bpost_map, bpost_auto = masked_ctx([b["text"] for b in ok] + [major])
         render_auto_mask_note(bpost_auto)
 
         # 반 전체 오탐(false-positive) 무시 컨트롤 (모든 검출어 대상)
@@ -1337,12 +1307,14 @@ if mode == "🔍 기재 금지 표현 검토":
             def _revise_job(idx: int) -> tuple[str, str]:
                 b = targets[idx]
                 try:
-                    masked_findings = [
-                        {**f, "word": apply_mask(f["word"], bpost_map)}
-                        for f in filter_ignored(b["findings"], ignored_now)
-                    ]
+                    masked_findings = mask_findings(
+                        filter_ignored(b["findings"], ignored_now), bpost_map
+                    )
                     revised = rewrite_with_gemini(
-                        apply_mask(b["text"], bpost_map), masked_findings, major, api_key
+                        apply_mask(b["text"], bpost_map),
+                        masked_findings,
+                        apply_mask(major, bpost_map),
+                        api_key,
                     )
                     return remove_mask(revised, bpost_map), ""
                 except Exception as e:
@@ -1360,7 +1332,9 @@ if mode == "🔍 기재 금지 표현 검토":
                     return (
                         remove_mask_deep(
                             assess_quality_with_gemini(
-                                apply_mask(b["text"], bpost_map), major, api_key
+                                apply_mask(b["text"], bpost_map),
+                                apply_mask(major, bpost_map),
+                                api_key,
                             ),
                             bpost_map,
                         ),
@@ -1738,11 +1712,15 @@ else:
 
             # 전송할 실제 텍스트(수행평가 + 전체 자기평가서)에서 개인정보 추가 탐지
             bdraft_map, bdraft_auto = masked_ctx(
-                [performance_text] + [t for _, t, _ in inputs] + list(style_examples)
+                [performance_text, subject, major]
+                + [t for _, t, _ in inputs]
+                + list(style_examples)
             )
             render_auto_mask_note(bdraft_auto)
             masked_performance = apply_mask(performance_text, bdraft_map)
             masked_style_examples = [apply_mask(x, bdraft_map) for x in style_examples]
+            masked_subject = apply_mask(subject, bdraft_map)
+            masked_major = apply_mask(major, bdraft_map)
 
             def _draft_job(idx: int) -> dict:
                 stem, eval_text, err = inputs[idx]
@@ -1750,8 +1728,8 @@ else:
                     return {"name": stem, "draft": "", "error": err}
                 try:
                     draft = generate_draft_with_gemini(
-                        subject,
-                        major,
+                        masked_subject,
+                        masked_major,
                         masked_performance,
                         apply_mask(eval_text, bdraft_map),
                         target_len,
@@ -1774,7 +1752,7 @@ else:
         else:
             # ── 단일 생성 ──
             sdraft_map, sdraft_auto = masked_ctx(
-                [performance_text, single_eval_text, observations_text]
+                [performance_text, single_eval_text, observations_text, subject, major]
                 + list(style_examples)
             )
             render_auto_mask_note(sdraft_auto)
@@ -1782,9 +1760,11 @@ else:
             masked_self_eval = apply_mask(single_eval_text, sdraft_map)
             masked_style_examples = [apply_mask(x, sdraft_map) for x in style_examples]
             masked_observations = apply_mask(observations_text, sdraft_map)
+            masked_subject = apply_mask(subject.strip(), sdraft_map)
+            masked_major = apply_mask(major, sdraft_map)
             # 재생성 시 원자료 맥락 전달용 (마스킹된 상태로 보관)
             draft_context = {
-                "subject": subject.strip(),
+                "subject": masked_subject,
                 "performance": masked_performance,
                 "self_eval": masked_self_eval,
                 "style_examples": masked_style_examples,
@@ -1796,8 +1776,8 @@ else:
                 try:
                     return (
                         generate_draft_with_gemini(
-                            subject,
-                            major,
+                            masked_subject,
+                            masked_major,
                             masked_performance,
                             masked_self_eval,
                             target_len,
@@ -1864,7 +1844,7 @@ else:
         st.text_area("초안 (복사해서 사용하세요)", value=draft, height=280)
         render_length_metrics(draft, neis_limit)
         # 이 초안에 대한 확장 마스킹 맵 (분량 조절·품질·오탈자가 공유)
-        draft_map, draft_auto = masked_ctx([draft])
+        draft_map, draft_auto = masked_ctx([draft, subject, major])
         render_auto_mask_note(draft_auto)
         render_length_adjuster(
             "draft_text",
@@ -1906,7 +1886,7 @@ else:
                 st.warning("⚠️ 반영할 피드백을 먼저 입력해 주세요.")
             else:
                 # 피드백 문장에도 학생 이름이 섞일 수 있어 함께 탐지한다.
-                refine_map, _ = masked_ctx([draft, feedback])
+                refine_map, _ = masked_ctx([draft, feedback, subject, major])
                 with st.spinner(f"피드백 반영 재생성 중… ({get_active_model()})"):
                     try:
                         refined = refine_draft_with_gemini(
@@ -1967,7 +1947,9 @@ else:
             )
 
         # ── 일괄 후처리: 품질 진단 / 오탈자 ──
-        dpost_map, dpost_auto = masked_ctx([b["draft"] for b in ok])
+        dpost_map, dpost_auto = masked_ctx(
+            [b["draft"] for b in ok] + [subject, major]
+        )
         render_auto_mask_note(dpost_auto)
         col_q, col_p = st.columns(2)
         if col_q.button(f"🏅 전체 품질 진단 ({len(ok)}명)", use_container_width=True):
@@ -1977,7 +1959,9 @@ else:
                     return (
                         remove_mask_deep(
                             assess_quality_with_gemini(
-                                apply_mask(b["draft"], dpost_map), major, api_key
+                                apply_mask(b["draft"], dpost_map),
+                                apply_mask(major, dpost_map),
+                                api_key,
                             ),
                             dpost_map,
                         ),

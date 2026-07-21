@@ -113,6 +113,23 @@ def remove_mask(text: str, mask_map: list[tuple[str, str]]) -> str:
     return text
 
 
+def mask_findings(
+    findings: list[dict], mask_map: list[tuple[str, str]]
+) -> list[dict]:
+    """검출 목록의 모든 문자열 필드를 마스킹한 새 목록을 반환한다.
+
+    word뿐 아니라 reason·basis·suggestion_1·suggestion_2 등 모든 문자열 값을
+    치환한다. 문자열이 아닌 값은 그대로 두며, 입력은 변형하지 않는다.
+    """
+    return [
+        {
+            k: (apply_mask(v, mask_map) if isinstance(v, str) else v)
+            for k, v in f.items()
+        }
+        for f in findings
+    ]
+
+
 def detect_pii(texts: list[str], existing: list[str] | None = None) -> list[str]:
     """전송 텍스트에서 개인정보로 판단되는 표현을 보수적으로 탐지한다.
 

@@ -207,10 +207,19 @@ def review_text_masked(
     custom_words: list[str],
     mask_map: list[tuple[str, str]],
 ) -> list[dict]:
-    """개인정보를 마스킹한 상태로 검토하고, 결과의 토큰을 원래 단어로 복원한다."""
-    findings = review_text(apply_mask(text, mask_map), major, api_key, custom_words)
+    """개인정보를 마스킹한 상태로 검토하고, 결과의 토큰을 원래 단어로 복원한다.
+
+    본문(text)뿐 아니라 희망 진로/학과(major)도 교사 자유 입력이므로 전송 전에
+    함께 마스킹한다.
+    """
+    findings = review_text(
+        apply_mask(text, mask_map),
+        apply_mask(major, mask_map),
+        api_key,
+        custom_words,
+    )
     for f in findings:
-        for k in ("word", "reason", "suggestion_1", "suggestion_2"):
+        for k in ("word", "reason", "basis", "suggestion_1", "suggestion_2"):
             if f.get(k):
                 f[k] = remove_mask(f[k], mask_map)
     return findings
