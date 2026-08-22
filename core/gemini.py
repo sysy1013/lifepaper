@@ -105,7 +105,29 @@ _RETRYABLE_MARKERS = (
 
 def _is_retryable_error(e: Exception) -> bool:
     msg = str(e).lower()
+    if _is_billing_error(e):
+        return False  # 크레딧 소진·결제 문제는 재시도해도 회복되지 않는다
     return any(m in msg for m in _RETRYABLE_MARKERS)
+
+
+# 크레딧 소진·결제 관련 오류를 나타내는 문구 (일시적 rate limit과 구분).
+_BILLING_MARKERS = ("prepayment", "credits are depleted", "billing", "quota_exceeded")
+
+
+def _is_billing_error(e: Exception) -> bool:
+    msg = str(e).lower()
+    return any(m in msg for m in _BILLING_MARKERS)
+
+
+class GeminiCreditError(RuntimeError):
+    """API 키의 크레딧이 소진되었거나 결제 문제로 호출이 막힌 경우."""
+
+
+_CREDIT_MESSAGE = (
+    "Gemini API 사용 크레딧이 모두 소진되었거나 결제가 중단되었습니다. "
+    "Google AI Studio(ai.studio/projects)에서 크레딧을 충전하거나 "
+    "다른 API 키로 교체한 뒤 다시 시도해 주세요."
+)
 
 
 def _gemini_text(model, prompt: str, max_attempts: int = 3) -> str:
@@ -120,6 +142,9 @@ def _gemini_text(model, prompt: str, max_attempts: int = 3) -> str:
             return text
         except Exception as e:
             last_error = e
+            # 크레딧 소진은 재시도·폴백이 무의미하므로 즉시 친절한 메시지로 중단한다.
+            if _is_billing_error(e):
+                raise GeminiCreditError(_CREDIT_MESSAGE) from e
             empty = isinstance(e, ValueError) and "빈 응답" in str(e)
             if attempt == max_attempts - 1:
                 if _is_retryable_error(e):
@@ -157,24 +182,36 @@ def _gemini_json(model, prompt: str, parse_attempts: int = 2):
 # Gemini 문맥 심사 (LLM-as-a-Judge)
 # ──────────────────────────────────────────────
 SYSTEM_PROMPT = """너는 교육부 '학교생활기록부 기재요령'을 완벽하게 숙지한 심사관이다.
-주어진 생기부 텍스트에서 아래 8가지 기준에 해당하는 '기재 금지 표현'을 모두 찾아라.
+주어진 생기부 텍스트에서 아래 9가지 기준에 해당하는 '기재 금지 표현'을 모두 찾아라.
 
 [심사 기준]
-1. 상업적 명칭/특정 브랜드 (예: 구글, 줌, 유튜브, 네이버 등)
-2. 교외상/교외 대회 수상 실적
+1. 상업적 명칭/특정 브랜드
+   (예: 구글, 네이버, 삼성, 카카오, 유튜브, 오픈AI, 마이크로소프트, 패들렛, 줌, 챗GPT 등)
+2. 교외상/교외 대회 수상 실적 (경시대회·올림피아드·공모전·콘테스트 참여 및 성적 포함)
 3. 특정 대학/기관/강사명
+   - 기관명 예시: 유네스코, OECD, UN, IMF, 통계청, 세계보건기구(WHO), 세계경제포럼 등
+   - 단, 교육관련기관(교육부·교육청·교육지원청 및 그 직속기관)은 예외로 위반이 아니다.
 4. 부모의 직업/사회적 지위를 암시하는 표현
-5. 해외 활동 (어학연수, 해외 봉사 등)
-6. 논문/출판/특허 실적
+5. 해외 활동 (어학연수, 해외 봉사, 해외 캠프·탐방, 교환학생 파견 등)
+6. 논문/출판/특허 실적 (논문 투고·등재·게재, 도서 출간, 지식재산권 출원·등록)
 7. 장학생/장학금 관련 내용
 8. 재학 중인 학교 명칭
+9. K-MOOC/MOOC/KOCW, 방과후학교 활동, 연구보고서(소논문) 실적(제목·연구주제·참여인원·소요시간) 언급
+   - 단, 수학과제 탐구/사회문제 탐구/융합과학 탐구/과학과제 연구/사회과제 연구/윤리문제 탐구
+     과목에서 실적을 제외한 특기사항 서술 자체는 위반이 아님에 유의한다.
+
+[판단 원칙]
+- 애매한 경우 놓치지 말고 최소 "주의"로 표시하라. 과소탐지보다 과탐지가 안전하다.
+- 대회 명칭을 "행사", "프로그램", "활동" 등으로 바꿔 쓴 편법 기재도 실질적으로 대회 참여·수상을
+  드러내면 위반으로 탐지하라.
+- 공인어학시험·인증시험 성적, 모의고사 성적, 각종 점수·등급·석차도 기재 금지 대상이다.
 
 [출력 규칙 - 반드시 준수]
 - 결과는 반드시 JSON 배열(List of Dicts)로만 반환한다. 다른 설명 문장을 절대 붙이지 않는다.
 - 각 항목은 다음 6개의 키를 반드시 포함한다:
   "word": 원문에서 발견된 표현 그대로 (원문 텍스트와 완전히 동일한 문자열)
-  "reason": 위반 사유 (위 8가지 기준 중 해당 항목)
-  "basis": 해당 위반이 근거하는 기재요령 심사 기준(위 8가지 중 해당 항목명)을 짧게
+  "reason": 위반 사유 (위 9가지 기준 중 해당 항목)
+  "basis": 해당 위반이 근거하는 기재요령 심사 기준(위 9가지 중 해당 항목명)을 짧게
   "severity": "위반"(명백한 기재 금지) 또는 "주의"(맥락상 문제 소지)
   "suggestion_1": 학생의 희망 진로와 연결한 대체 표현 1
   "suggestion_2": 학생의 희망 진로와 연결한 대체 표현 2
@@ -253,6 +290,23 @@ def review_text_masked(
             if f.get(k):
                 f[k] = remove_mask(f[k], mask_map)
     return findings
+
+
+def review_text_masked_multi(
+    segments: list[tuple[str, str]],
+    major: str,
+    api_key: str,
+    custom_words: list[str],
+    mask_map: list[tuple[str, str]],
+) -> list[dict]:
+    """과목별로 분리된 세그먼트를 각각 검토하고, 각 finding에 subject를 태깅해 합친다."""
+    all_findings: list[dict] = []
+    for subject, content in segments:
+        findings = review_text_masked(content, major, api_key, custom_words, mask_map)
+        for f in findings:
+            f["subject"] = subject
+        all_findings.extend(findings)
+    return all_findings
 
 
 # ──────────────────────────────────────────────

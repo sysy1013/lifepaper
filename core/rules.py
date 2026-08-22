@@ -63,9 +63,75 @@ RULE_PATTERNS = [
     (
         # '줌'은 '보여줌' 같은 일반 어미와 겹치므로 한글 경계를 요구한다
         r"(?:구글|유튜브|네이버|카카오톡?|인스타그램|페이스북|틱톡|챗GPT|ChatGPT|GPT|제미나이|"
-        r"(?<![가-힣])줌(?![가-힣])|Zoom|넷플릭스|아이폰|아이패드|갤럭시|파워포인트|엑셀)",
+        r"(?<![가-힣])줌(?![가-힣])|Zoom|넷플릭스|아이폰|아이패드|갤럭시|파워포인트|엑셀|"
+        r"오픈AI|OpenAI|마이크로소프트|Microsoft|패들렛|Padlet|삼성(?!전자고|디지털))",
         "상업적 명칭/브랜드 의심",
         "기재요령: 상업적 명칭 기재 불가",
+    ),
+    # 국제/공공기관명 (교육관련기관 외 기관명 기재 금지)
+    # 라틴 약어는 (?-i:...)로 대소문자 구분을 되살려 'who', 'un' 같은 영단어 오탐을 막는다.
+    (
+        r"(?:유네스코|통계청|세계보건기구|세계경제포럼|"
+        r"(?-i:(?<![A-Za-z])(?:UNESCO|OECD|UN|IMF|WHO)(?![A-Za-z])))",
+        "국제/공공기관명 의심 (교육관련기관 외 기관명 기재 금지)",
+        "기재요령: 교육관련기관 외 기관명 기재 불가",
+    ),
+    # 자격증 명칭 (자격증 취득상황 이외 항목에는 기재 금지)
+    (
+        r"(?:컴퓨터활용능력|정보처리기사|워드프로세서|한국사능력검정시험|한국어능력시험|"
+        r"(?-i:(?<![A-Za-z])(?:ITQ|TOPCIT|GTQ)(?![A-Za-z])))",
+        "자격증 명칭 의심 (자격증 취득상황 이외 항목 기재 금지)",
+        "기재요령: 자격증 명칭·취득 사실은 해당 항목 외 기재 불가",
+    ),
+    # 대회 참여·수상 실적
+    (
+        r"[가-힣A-Za-z]*(?:경시대회|올림피아드|콘테스트|공모전)(?:에서)?\s*"
+        r"(?:수상|입상|우승|최우수상|대상|금상|은상|동상)?",
+        "대회 참여·수상 표현 의심 (교외상 등 수상실적 기재 금지)",
+        "기재요령: 교내외 대회 참여·성적·수상실적 기재 불가",
+    ),
+    # 논문 투고·등재 / 도서 출간
+    (
+        r"(?:논문(?:을)?\s*(?:투고|등재|게재|발표)|학회지에|도서\s*출간|출판사에서\s*출간)",
+        "논문 등재·도서출간 의심",
+        "기재요령: 논문 투고/등재, 도서출간 사실 기재 불가",
+    ),
+    # 지식재산권 출원·등록
+    (
+        r"(?:특허(?:출원|등록)|실용신안|상표권|디자인권|지식재산권)",
+        "지식재산권 출원/등록 의심",
+        "기재요령: 지식재산권 출원 또는 등록 사실 기재 불가",
+    ),
+    # 해외 활동 실적
+    (
+        r"(?:해외\s*(?:봉사|어학연수|캠프|탐방)|어학연수|교환학생(?:으로)?\s*(?:파견|선발|참여))",
+        "해외 활동 실적 의심",
+        "기재요령: 어학연수·해외봉사 등 해외 활동실적 기재 불가",
+    ),
+    # 장학생·장학금
+    (
+        r"(?:장학생(?:으로)?\s*(?:선발|선정)|장학금(?:을)?\s*(?:수혜|받))",
+        "장학생/장학금 관련 표현 의심",
+        "기재요령: 장학생·장학금 관련 내용 기재 불가",
+    ),
+    # 온라인 강좌(MOOC)·방과후학교 — 세특 입력 불가 항목
+    (
+        r"(?:(?-i:(?<![A-Za-z])(?:K-MOOC|KOCW|MOOC)(?![A-Za-z]))|방과후\s*학교)",
+        "MOOC/방과후학교 활동 의심 (세특 입력 불가 항목)",
+        "기재요령: K-MOOC·MOOC·KOCW, 방과후학교 활동은 세특에 입력 불가",
+    ),
+    # 소논문(자율탐구활동 연구보고서)
+    (
+        r"소논문",
+        "소논문 관련 표현 (세특 입력 불가, 지정 6개 과목 예외 존재)",
+        "기재요령: 자율탐구활동 연구보고서(소논문) 실적은 기재 불가",
+    ),
+    # 대학명 일반 패턴 (고정 목록에 없는 'OO대학교/OO대학원'까지 포착)
+    # 앞에 공백 없이 한글이 2~8자 붙은 경우만 잡아 '진학할 대학교' 같은 일반어를 피한다.
+    (
+        r"[가-힣]{2,8}(?:대학교|대학원)",
+        "특정 대학명 의심 (일반 패턴)",
+        "기재요령: 구체적인 특정 대학명 기재 불가",
     ),
 ]
 
@@ -137,8 +203,117 @@ CLICHE_EXPRESSIONS = [
 ]
 
 
+# 한글 표기 원칙(기재요령 p.28)의 예외로 널리 쓰이는 영문 약어·단위
+ALLOWED_ENGLISH_TERMS = {
+    "CEO", "PD", "UCC", "IT", "POP", "CF", "TV", "PAPS", "SNS", "PPT", "AI",
+    "OECD", "CD", "DVD", "GPS", "ID", "URL", "PDF", "USB", "VR", "AR", "IoT",
+    "km", "cm", "mm", "kg", "cc", "ml",
+}
+_ALLOWED_ENGLISH_UPPER = {t.upper() for t in ALLOWED_ENGLISH_TERMS}
+
+# 미매칭 괄호를 최대 몇 개까지 보고할지 (병리적 입력에서 경고 폭주 방지)
+_MAX_BRACKET_WARNINGS = 3
+
+_QUOTE_LABELS = {"'": "작은따옴표", '"': "큰따옴표"}
+
+# 지양 대상 특수문자: 원문자·불릿류
+_SPECIAL_CHAR_RE = re.compile(r"[①-⑳★☆●○◆◇▶▷■□※~]")
+# 줄 시작의 문단 구분 번호 (1., 2), 一. 등)
+_PARA_NUMBER_RE = re.compile(
+    r"^\s*(?:[0-9]{1,2}[.)]|[一二三四五六七八九十]+[.)])\s", re.MULTILINE
+)
+_LATIN_TOKEN_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+def _context(text: str, i: int) -> str:
+    """위치 i 주변 컨텍스트(앞뒤 15자)를 한 줄로 만들어 돌려준다."""
+    return re.sub(r"\s+", " ", text[max(0, i - 15) : i + 16]).strip()
+
+
+def _check_quote_bracket_balance(text: str) -> list[str]:
+    """따옴표 개수(홀짝)와 괄호 짝(스택 기반)을 검사한다."""
+    warnings: list[str] = []
+
+    # 1) 따옴표: 개수가 홀수면 마지막 등장 위치를 짝이 어긋난 지점으로 지목한다.
+    for ch, label in _QUOTE_LABELS.items():
+        positions = [i for i, c in enumerate(text) if c == ch]
+        if len(positions) % 2 == 1:
+            warnings.append(
+                f"따옴표 짝 불일치 의심 — {label}({ch})이(가) 홀수 개"
+                f"({len(positions)}개) 발견됨. 마지막 위치 부근: "
+                f"「{_context(text, positions[-1])}」"
+            )
+
+    # 2) 괄호: 스택으로 미매칭 위치를 정확히 찾는다 (따옴표보다 신뢰도가 높다).
+    stack: list[int] = []
+    unmatched_close: list[int] = []
+    for i, c in enumerate(text):
+        if c == "(":
+            stack.append(i)
+        elif c == ")":
+            if stack:
+                stack.pop()
+            else:
+                unmatched_close.append(i)
+
+    shown = 0
+    for i in unmatched_close:
+        if shown >= _MAX_BRACKET_WARNINGS:
+            break
+        warnings.append(
+            "괄호 짝 불일치 — 닫는 괄호 ')'가 여는 괄호 없이 나타남: "
+            f"「{_context(text, i)}」"
+        )
+        shown += 1
+    for i in stack:
+        if shown >= _MAX_BRACKET_WARNINGS:
+            break
+        warnings.append(
+            "괄호 짝 불일치 — 여는 괄호 '('가 닫히지 않음: "
+            f"「{_context(text, i)}」"
+        )
+        shown += 1
+
+    return warnings
+
+
+def _check_special_characters(text: str) -> list[str]:
+    """특수문자·문단구분기호(번호) 사용을 점검한다 (기재요령 p.40 지양 사항)."""
+    found = _SPECIAL_CHAR_RE.findall(text) + [
+        m.group().strip() for m in _PARA_NUMBER_RE.finditer(text)
+    ]
+    if not found:
+        return []
+    uniq = list(dict.fromkeys(found))
+    sample = ", ".join(f"「{s}」" for s in uniq[:5])
+    return [
+        f"특수문자·문단구분기호 {len(found)}회 발견 — 기재요령상 입력을 지양합니다: {sample}"
+    ]
+
+
+def _check_english_usage(text: str) -> list[str]:
+    """한글 표기 원칙에 어긋나는 영문 표기를 점검한다 (화이트리스트 예외)."""
+    flagged: dict[str, str] = {}
+    for token in _LATIN_TOKEN_RE.findall(text):
+        key = token.upper()
+        if key in _ALLOWED_ENGLISH_UPPER or key in flagged:
+            continue
+        flagged[key] = token
+    if not flagged:
+        return []
+    sample = ", ".join(f"「{t}」" for t in list(flagged.values())[:5])
+    return [
+        "영문 표기 검토 필요 — 한글 표기가 원칙이며 부득이한 경우"
+        "(외국인 성명/도서명·저자명/일반화된 명사 등)만 영문이 허용됨: " + sample
+    ]
+
+
 def style_check(text: str) -> list[str]:
-    """개조식 어미 위반, 어미 반복, 상투적 표현을 점검하여 경고 목록을 반환한다."""
+    """문체·표기 점검 경고 목록을 반환한다.
+
+    개조식 어미 위반, 어미 반복, 상투적 표현에 더해 따옴표/괄호 짝,
+    특수문자·문단구분기호, 한글 표기 원칙(영문 오남용)을 함께 점검한다.
+    """
     warnings = []
 
     # 1) 개조식이 아닌 종결어미 (~했다, ~합니다 등)
@@ -171,6 +346,15 @@ def style_check(text: str) -> list[str]:
             "상투적 표현 발견 — 구체적 행동·산출물 서술로 대체 권장: "
             + ", ".join(f"「{c}」" for c in found)
         )
+
+    # 4) 따옴표/괄호 짝 검사
+    warnings.extend(_check_quote_bracket_balance(text))
+
+    # 5) 특수문자·문단구분기호 사용 지양
+    warnings.extend(_check_special_characters(text))
+
+    # 6) 한글 표기 원칙(영문 오남용) 검사
+    warnings.extend(_check_english_usage(text))
 
     return warnings
 

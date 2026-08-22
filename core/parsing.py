@@ -217,6 +217,43 @@ def read_uploaded_file(uploaded_file) -> str:
         return data.decode("cp949")
 
 
+# ──────────────────────────────────────────────
+# '과목명: 내용' 형식 텍스트의 과목별 분리
+# ──────────────────────────────────────────────
+# 과목명은 한글·로마숫자(Ⅰ~Ⅻ)·가운뎃점으로 이루어지며, '사회와 문화'처럼
+# 공백이 들어간 과목명도 있으므로 공백으로 이어진 낱말 묶음까지 허용한다.
+_SUBJECT_HEADER_RE = re.compile(
+    r"^([가-힣Ⅰ-Ⅻ·]{1,12}(?: [가-힣Ⅰ-Ⅻ·]{1,12}){0,3}):\s*(?=\S)", re.MULTILINE
+)
+_SUBJECT_NAME_MIN = 2
+_SUBJECT_NAME_MAX = 15
+
+
+def split_by_subject(text: str) -> list[tuple[str, str]]:
+    """'과목명: 내용' 형식으로 여러 과목이 붙어 있는 텍스트를 과목별로 분리한다.
+
+    과목 헤더가 2개 미만이면 분리하지 않고 [("", text)]를 반환해
+    기존 단일 텍스트 처리와 동일하게 동작한다.
+    """
+    matches = [
+        m
+        for m in _SUBJECT_HEADER_RE.finditer(text or "")
+        if _SUBJECT_NAME_MIN <= len(m.group(1).strip()) <= _SUBJECT_NAME_MAX
+    ]
+    if len(matches) < 2:
+        return [("", text)]
+
+    segments: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        subject = m.group(1).strip()
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        content = text[start:end].strip()
+        if content:
+            segments.append((subject, content))
+    return segments
+
+
 def file_stem(name: str) -> str:
     return re.sub(r"\.(hwp|hwpx|txt|docx|pdf)$", "", name, flags=re.IGNORECASE)
 

@@ -17,8 +17,46 @@ from core.parsing import (
     parse_eval_table,
     parse_roster_table,
     read_uploaded_file,
+    split_by_subject,
     unique_names,
 )
+
+
+# ── split_by_subject ──
+# 교사가 여러 과목 세특을 한 칸에 붙여 넣는 실제 입력 형태 (6개 과목)
+SIX_SUBJECT_TEXT = """영어Ⅰ: 환경 문제를 다룬 지문을 읽고 핵심 주장을 요약해 발표함. 근거 문장을 스스로 골라 논리 구조를 설명함.
+사회와 문화: 청소년의 미디어 이용 실태를 주제로 설문을 설계하고 결과를 표로 정리함.
+물리학: 빛의 굴절 실험을 설계해 오차 원인을 스스로 분석하고 보고서로 정리함.
+정보: 급식 잔반 자료를 수집해 알고리즘으로 분류하고 시각화함.
+일본어: 짧은 자기소개문을 작성하고 억양에 유의해 발표함.
+운동과 건강: 심폐 지구력 향상 계획을 세우고 4주간 기록을 남기며 변화를 점검함."""
+
+
+def test_split_by_subject_splits_six_subject_block():
+    segments = split_by_subject(SIX_SUBJECT_TEXT)
+    assert [s for s, _ in segments] == [
+        "영어Ⅰ",
+        "사회와 문화",
+        "물리학",
+        "정보",
+        "일본어",
+        "운동과 건강",
+    ]
+    # 각 과목 본문은 해당 과목 내용만 담고 다음 과목 헤더를 포함하지 않는다.
+    assert segments[0][1].startswith("환경 문제를 다룬")
+    assert "사회와 문화" not in segments[0][1]
+    assert segments[-1][1].startswith("심폐 지구력")
+
+
+def test_split_by_subject_plain_text_returns_single_unlabeled_segment():
+    text = "데이터를 수집하여 그래프로 표현하고 원인을 고찰함"
+    assert split_by_subject(text) == [("", text)]
+
+
+def test_split_by_subject_single_header_does_not_split():
+    # 헤더가 1개뿐이면 '참고:' 같은 우발적 라벨일 수 있으므로 분리하지 않는다.
+    text = "물리학: 빛의 굴절 실험을 설계하고 오차 원인을 분석함."
+    assert split_by_subject(text) == [("", text)]
 
 
 def test_file_stem_strips_known_extensions():

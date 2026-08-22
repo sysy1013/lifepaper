@@ -21,6 +21,7 @@ from core.gemini import (
     get_fallback_models,
     proofread_with_gemini,
     quality_avg,
+    review_text_masked_multi,
     rewrite_with_gemini,
     set_active_model,
 )
@@ -398,6 +399,43 @@ def test_generate_content_does_not_swallow_other_errors():
     with pytest.raises(ValueError, match="401"):
         model.generate_content("p")
     assert client.models.calls == 1
+
+
+# ── review_text_masked_multi ──
+def test_review_text_masked_multi_tags_subject_per_segment(monkeypatch):
+    calls = []
+
+    def _fake_review(text, major, api_key, custom_words, mask_map):
+        calls.append(text)
+        return [{"word": f"검출-{text}", "reason": "사유", "severity": "주의"}]
+
+    monkeypatch.setattr("core.gemini.review_text_masked", _fake_review)
+
+    segments = [("물리학", "굴절 실험 본문"), ("정보", "알고리즘 본문")]
+    findings = review_text_masked_multi(segments, "전공", "key", [], [])
+
+    # 세그먼트마다 정확히 한 번씩 호출되고, 본문만 전달된다.
+    assert calls == ["굴절 실험 본문", "알고리즘 본문"]
+    assert [f["subject"] for f in findings] == ["물리학", "정보"]
+    assert [f["word"] for f in findings] == ["검출-굴절 실험 본문", "검출-알고리즘 본문"]
+
+
+def test_review_text_masked_multi_empty_segments_returns_empty(monkeypatch):
+    monkeypatch.setattr(
+        "core.gemini.review_text_masked",
+        lambda *a, **k: pytest.fail("빈 세그먼트에서는 호출되면 안 된다"),
+    )
+    assert review_text_masked_multi([], "전공", "key", [], []) == []
+
+
+def test_review_text_masked_multi_preserves_findings_without_subject_key(monkeypatch):
+    # 하위 호출이 subject를 채우지 않아도 multi가 항상 덮어써 준다.
+    monkeypatch.setattr(
+        "core.gemini.review_text_masked",
+        lambda *a, **k: [{"word": "TOEIC", "subject": "잘못된값"}],
+    )
+    findings = review_text_masked_multi([("영어Ⅰ", "본문")], "전공", "key", [], [])
+    assert findings == [{"word": "TOEIC", "subject": "영어Ⅰ"}]
 
 
 # ── _strip_code_fence ──

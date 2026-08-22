@@ -20,6 +20,7 @@ import io
 import json
 import re
 import zipfile
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -44,6 +45,7 @@ from core.gemini import (
     quality_avg,
     refine_draft_with_gemini,
     review_text_masked,
+    review_text_masked_multi,
     rewrite_with_gemini,
     set_active_model,
     summarize_activity_with_gemini,
@@ -66,6 +68,7 @@ from core.parsing import (
     parse_eval_table,
     parse_roster_table,
     read_uploaded_file,
+    split_by_subject,
     unique_names,
 )
 from core.project import replace_in_entries
@@ -242,14 +245,22 @@ def run_batch_review_pipeline(
                 "row_major": row_major,
             }
         try:
+            # '과목명: 내용'이 여러 개면 과목별로 나눠 검토하고 subject를 태깅한다.
+            segments = split_by_subject(text)
             # review_text_masked가 내부에서 major까지 마스킹해 전송한다.
-            findings = review_text_masked(
-                text, eff_major, api_key, custom_words, mask_map
-            )
+            if len(segments) > 1:
+                findings = review_text_masked_multi(
+                    segments, eff_major, api_key, custom_words, mask_map
+                )
+            else:
+                findings = review_text_masked(
+                    text, eff_major, api_key, custom_words, mask_map
+                )
             return {
                 "name": stem,
                 "text": text,
                 "findings": findings,
+                "segments": segments,
                 "error": "",
                 "major": eff_major,
                 "row_major": row_major,
@@ -729,6 +740,62 @@ def show_review_output(text: str, findings: list[dict], csv_name: str = "생기�
         file_name=csv_name,
         mime="text/csv",
     )
+
+
+def group_findings_by_subject(findings: list[dict]) -> dict[str, list[dict]]:
+    """findings를 subject(과목명) 기준으로 묶는다. subject가 없으면 ""로 묶인다."""
+    grouped: dict[str, list[dict]] = {}
+    for f in findings:
+        grouped.setdefault(f.get("subject", ""), []).append(f)
+    return grouped
+
+
+def render_subject_sections(
+    segments: list[tuple[str, str]],
+    findings: list[dict],
+    api_key: str,
+    mask_map: list[tuple[str, str]],
+    neis_limit: int,
+    key_prefix: str,
+    csv_name: str = "생기부_심사결과.csv",
+) -> None:
+    """과목별 세그먼트마다 검출 결과·문체 점검·오탈자 검사를 expander로 묶어 표시한다."""
+    grouped = group_findings_by_subject(findings)
+    n_violation = sum(1 for f in findings if f.get("severity", "위반") == "위반")
+    st.info(
+        f"총 **{len(findings)}건** 검출 — 🚨 위반 **{n_violation}건**, "
+        f"⚠️ 주의 **{len(findings) - n_violation}건** (과목 {len(segments)}개)"
+    )
+
+    for idx, (subject, content) in enumerate(segments):
+        group = grouped.get(subject, [])
+        with st.expander(f"📘 {subject or '과목 미상'} — {len(group)}건", expanded=True):
+            render_length_metrics(content, neis_limit)
+            if group:
+                render_highlight_box(
+                    content,
+                    [f["word"] for f in group],
+                    {f["word"]: f.get("severity", "위반") for f in group},
+                )
+                st.dataframe(
+                    findings_to_df(group), use_container_width=True, hide_index=True
+                )
+            else:
+                st.success("🎉 검출된 기재 금지 표현이 없습니다!")
+
+            for w in style_check(content):
+                st.warning(w)
+
+            # 세션 키를 과목별로 분리해 과목마다 독립적으로 오탈자 검사를 돌린다.
+            render_proofread_block(content, api_key, mask_map, f"{key_prefix}__{idx}")
+
+    if findings:
+        st.download_button(
+            "📥 심사 결과 CSV 다운로드 (전체 과목)",
+            data=findings_to_df(findings).to_csv(index=False).encode("utf-8-sig"),
+            file_name=csv_name,
+            mime="text/csv",
+        )
 
 
 # ──────────────────────────────────────────────
@@ -1298,14 +1365,25 @@ if mode == "🔍 기재 금지 표현 검토":
             st.session_state.pop("proofread_review", None)
 
             single_map, _ = masked_ctx([input_text, major])
+            segments = split_by_subject(input_text)
+            if len(segments) > 1:
+                st.info(
+                    f"📚 {len(segments)}개 과목 감지됨 — 과목별로 결과를 분류해 보여드립니다."
+                )
             with st.spinner(f"규칙 기반 필터링 + Gemini 문맥 심사 중… ({get_active_model()})"):
                 try:
-                    findings = review_text_masked(
-                        input_text, major, api_key, custom_words, single_map
-                    )
+                    if len(segments) > 1:
+                        findings = review_text_masked_multi(
+                            segments, major, api_key, custom_words, single_map
+                        )
+                    else:
+                        findings = review_text_masked(
+                            input_text, major, api_key, custom_words, single_map
+                        )
                     st.session_state["review_result"] = {
                         "text": input_text,
                         "findings": findings,
+                        "segments": segments,
                     }
                     record_history(f"검토: {len(findings)}건 검출", input_text)
                 except json.JSONDecodeError:
@@ -1335,9 +1413,22 @@ if mode == "🔍 기재 금지 표현 검토":
         render_auto_mask_note(rev_auto)
 
         render_length_metrics(review["text"], neis_limit)
-        render_style_warnings(review["text"])
-        findings = render_ignore_control(review["findings"], "ign_single")
-        show_review_output(review["text"], findings)
+        review_segments = review.get("segments") or []
+        if len(review_segments) > 1:
+            # 과목별 분류 모드 — 과목마다 검출·문체·오탈자를 따로 보여 준다.
+            findings = render_ignore_control(review["findings"], "ign_single")
+            render_subject_sections(
+                review_segments,
+                findings,
+                api_key,
+                rev_map,
+                neis_limit,
+                "proofread_review",
+            )
+        else:
+            render_style_warnings(review["text"])
+            findings = render_ignore_control(review["findings"], "ign_single")
+            show_review_output(review["text"], findings)
 
         if findings:
             st.subheader("4️⃣ 수정본 자동 생성")
@@ -1395,13 +1486,20 @@ if mode == "🔍 기재 금지 표현 검토":
                 ):
                     with st.spinner(f"수정본 재검토 중… ({get_active_model()})"):
                         try:
-                            new_findings = review_text_masked(
-                                revised, major, api_key, custom_words, rev2_map
-                            )
+                            new_segments = split_by_subject(revised)
+                            if len(new_segments) > 1:
+                                new_findings = review_text_masked_multi(
+                                    new_segments, major, api_key, custom_words, rev2_map
+                                )
+                            else:
+                                new_findings = review_text_masked(
+                                    revised, major, api_key, custom_words, rev2_map
+                                )
                             push_undo("review_result", dict(review))
                             st.session_state["review_result"] = {
                                 "text": revised,
                                 "findings": new_findings,
+                                "segments": new_segments,
                             }
                             for k in (
                                 "revised_text",
@@ -1709,6 +1807,14 @@ if mode == "🔍 기재 금지 표현 검토":
                     )
                 else:
                     st.success("검출된 기재 금지 표현이 없습니다.")
+                # 과목별로 분리 검토된 학생은 과목별 소계를 함께 보여 준다.
+                if len(b.get("segments", [])) > 1:
+                    counts = Counter(f.get("subject", "") for f in b_findings)
+                    subtotal = ", ".join(
+                        f"{s} {n}건" for s, n in counts.items() if s
+                    )
+                    if subtotal:
+                        st.caption("과목별: " + subtotal)
                 for w in style_check(b["text"]):
                     st.warning(w)
 
