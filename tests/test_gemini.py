@@ -7,6 +7,7 @@ from core.gemini import (
     CATEGORY_GUIDES,
     DEFAULT_MODEL,
     MODEL_CHOICES,
+    SYSTEM_PROMPT,
     _FALLBACK_ORDER,
     _gemini_json,
     _gemini_text,
@@ -436,6 +437,14 @@ def test_review_text_masked_multi_preserves_findings_without_subject_key(monkeyp
     )
     findings = review_text_masked_multi([("영어Ⅰ", "본문")], "전공", "key", [], [])
     assert findings == [{"word": "TOEIC", "subject": "영어Ⅰ"}]
+
+
+def test_system_prompt_still_lists_zoom_as_brand_example():
+    # core/rules.py는 오탐 방지를 위해 한글 '줌' 패턴을 규칙에서 뺐다(회귀 테스트:
+    # test_rules.py::test_rule_filter_alone_misses_bare_korean_zoom_by_design).
+    # 그 트레이드오프는 SYSTEM_PROMPT가 '줌'을 브랜드 예시로 계속 명시해야 성립하므로,
+    # 프롬프트를 다듬다가 이 예시가 빠지면 한글 Zoom 탐지가 조용히 사라진다.
+    assert "줌" in SYSTEM_PROMPT
 
 
 # ── _strip_code_fence ──

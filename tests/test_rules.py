@@ -53,6 +53,78 @@ def test_rule_filter_detects_custom_word():
     assert match[0]["reason"] == "사용자 정의 금칙어"
 
 
+def test_rule_filter_detects_zoom_brand():
+    findings = rule_based_filter("Zoom 수업에 참여함")
+    words = [f["word"] for f in findings]
+    assert any("Zoom" in w for w in words)
+
+
+def test_rule_filter_does_not_flag_verb_ending_jum():
+    text = (
+        "탐구를 통해 물리 법칙이 실생활 문제 해결에 활용되는 "
+        "의미를 이해하고자 하는 모습을 보여 줌."
+    )
+    findings = rule_based_filter(text)
+    words = [f["word"] for f in findings]
+    assert "줌" not in words
+    assert findings == []
+
+
+# '~해 주다'의 명사형 종결('~해 줌')은 개조식 세특에서 흔한 정상 표현이다.
+# 띄어쓰기 유무와 선행 어간이 달라도 어떤 RULE_PATTERNS에도 걸리면 안 된다.
+_JUM_VERB_ENDING_TEXTS = [
+    "모둠원이 모은 실험 데이터를 표로 정리해 줌.",
+    "친구가 놓친 부분을 짚어 발표 원고를 완성해 줌.",
+    "마감 전에 보고서를 스스로 점검해 제출해 줌.",
+    "개념을 어려워하는 친구를 끝까지 도와줌.",
+    "풀이 과정을 단계별로 나누어 차근차근 알려 줌.",
+    "직접 설계한 회로 모형을 모둠 전체가 쓰도록 만들어 줌.",
+]
+
+
+@pytest.mark.parametrize("text", _JUM_VERB_ENDING_TEXTS)
+def test_rule_filter_does_not_flag_haejum_verb_endings(text):
+    assert rule_based_filter(text) == [], f"'~해 줌' 종결 오탐: {text}"
+
+
+def test_rule_filter_paragraph_with_multiple_jum_endings_is_clean():
+    # 한 문단에 '줌' 종결이 여러 번 나와도 누적 오탐이 없어야 한다.
+    text = (
+        "실험 조건을 바꿔가며 데이터를 모으고 결과를 표로 정리해 줌. "
+        "오차가 큰 구간을 찾아 원인을 설명해 줌. "
+        "모둠원이 이해할 때까지 그래프 해석 방법을 알려 줌."
+    )
+    assert rule_based_filter(text) == []
+
+
+def test_rule_filter_alone_misses_bare_korean_zoom_by_design():
+    """규칙 단독으로는 한글 '줌' 브랜드 언급을 잡지 않는다 — 의도된 설계다.
+
+    '줌 수업'(Zoom)과 '보여 줌'(주다의 명사형)을 정규식만으로 구분할 수 없어
+    오탐 비용이 훨씬 컸다. 규칙 기반은 API 없이 도는 고속 보조 필터일 뿐이고,
+    실제 1차 검출기는 항상 함께 실행되는 Gemini 심사다
+    (core/gemini.py review_text가 rule_based_filter + analyze_with_gemini를
+    병합하며, SYSTEM_PROMPT 심사기준 1번이 '줌'을 브랜드 예시로 명시한다).
+    따라서 아래 결과는 버그가 아니라 합의된 트레이드오프이므로,
+    한글 '줌' 패턴을 규칙에 되살리는 '수정'은 회귀다.
+    """
+    for text in ("줌 수업에 참여함", "줌으로 화상회의를 진행함"):
+        words = [f["word"] for f in rule_based_filter(text)]
+        assert not any("줌" in w for w in words), f"규칙이 한글 '줌'을 검출함: {text}"
+
+
+def test_rule_filter_detects_zoom_embedded_in_korean_sentence():
+    # 영문 'Zoom'은 한국어 조사가 바로 붙어도 여전히 검출되어야 한다 (미탐 방지).
+    findings = rule_based_filter("Zoom으로 진행된 화상 수업에 참여함")
+    assert any("Zoom" in f["word"] for f in findings)
+
+
+@pytest.mark.parametrize("text", ["zoom 화상수업에 참여함", "ZOOM 회의에 참여함"])
+def test_rule_filter_detects_zoom_case_insensitively(text):
+    findings = rule_based_filter(text)
+    assert any(f["word"].lower() == "zoom" for f in findings)
+
+
 def test_rule_filter_clean_text_returns_empty():
     assert rule_based_filter("탐구 활동을 통해 꾸준히 성장하는 모습을 보임") == []
 
