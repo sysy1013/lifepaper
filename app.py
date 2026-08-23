@@ -173,7 +173,6 @@ def clear_all_session() -> None:
     for k in list(st.session_state.keys()):
         if k not in CLEAR_KEEP_KEYS:
             del st.session_state[k]
-    st.rerun()
 
 
 def render_replace_control(state_key: str, field: str, widget_key: str) -> None:
@@ -1047,6 +1046,7 @@ with st.sidebar:
         "학생의 희망 진로/학과",
         placeholder="예: 의예과, 컴퓨터공학과, 교육학과 …",
         help="검토 시 대체 표현 추천, 초안 작성 시 진로 연계 서술에 활용됩니다.",
+        key="major",
     )
 
     # 항목 라벨이 바뀌면 세션에 남은 옛 라벨이 selectbox 옵션과 어긋나 오류가 난다.
@@ -1084,6 +1084,7 @@ with st.sidebar:
         height=90,
         placeholder="쉼표 또는 줄바꿈으로 구분\n예) 홍성여고, ○○학원, △△대학교",
         help="학교명 등 반드시 걸러야 할 단어를 등록하면 규칙 기반 검출에 추가됩니다.",
+        key="custom_words_raw",
     )
     custom_words = parse_custom_words(custom_words_raw)
 
@@ -1282,6 +1283,7 @@ if mode == "🔍 기재 금지 표현 검토":
             "생기부 내용을 붙여넣으세요.",
             height=250,
             placeholder="예) 의사인 아버지의 영향을 받아 TOEIC 900점을 취득하였으며 …",
+            key="input_text",
         )
 
     # 개인정보 마스킹 자동 제안 (단일 파일 미리보기 / 직접 붙여넣기)
