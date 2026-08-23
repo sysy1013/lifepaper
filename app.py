@@ -98,6 +98,23 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# 아이콘 폰트(Material Symbols)가 로드되지 않으면 사이드바를 다시 펼치는 버튼이
+# 텍스트 리거처만 남아 0×0 크기로 접혀 클릭이 불가능해진다. 폰트 로드 여부와
+# 무관하게 항상 클릭 가능한 최소 크기를 강제한다.
+st.markdown(
+    """
+    <style>
+    [data-testid="stExpandSidebarButton"] {
+        min-width: 32px !important;
+        min-height: 32px !important;
+        width: 32px !important;
+        height: 32px !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 apply_theme()
 
 # 일괄 처리 동시 호출 수 (무료 쿼터에서도 429는 재시도로 흡수)
