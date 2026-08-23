@@ -26,6 +26,7 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from core.formatting import (
     build_batch_workbook,
@@ -96,6 +97,20 @@ st.set_page_config(
     page_icon="📋",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+# 사이드바 접힘 여부는 브라우저 localStorage(stSidebarCollapsed-<origin>)에
+# 영구 저장되어 initial_sidebar_state보다 우선 적용된다. 한 번이라도 접히면
+# (Streamlit Cloud 공유 iframe에서는 다시 펼치는 툴바 버튼이 embed 모드 때문에
+# display:none으로 숨겨져 있어 사용자가 되돌릴 방법이 없다) 서버를 아무리 재배포·
+# 재부팅해도 그 브라우저에서는 영원히 접힌 채로 남는다. 매 로드마다 이 저장값을
+# 지워 항상 펼쳐진 상태로 시작하도록 강제한다.
+components.html(
+    "<script>"
+    "try { localStorage.removeItem('stSidebarCollapsed-' + window.location.origin); } "
+    "catch (e) {}"
+    "</script>",
+    height=0,
 )
 
 # 아이콘 폰트(Material Symbols)가 로드되지 않으면 사이드바를 다시 펼치는 버튼이
