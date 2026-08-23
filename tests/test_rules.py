@@ -144,6 +144,17 @@ _STRICT_POSITIVE_CASES = [
     ("소논문", "소논문 형식으로 결과를 정리함", "소논문"),
     ("대학명 일반 패턴", "한국대학교 연구실을 견학함", "한국대학교"),
     ("브랜드 확장", "오픈AI의 도구로 자료를 정리함", "오픈AI"),
+    # ── 2차 확장 (2026-08-23 기재금지표현 커버리지 확장) ──
+    ("교외상 문서명", "지역 기관에서 받은 표창장 내용을 소개함", "표창장"),
+    ("교외상 문서명(감사장)", "봉사 기관에서 감사장을 받았다는 사실을 언급함", "감사장"),
+    ("인증시험(일반)", "교내 인증시험에 응시해 어휘력을 점검함", "인증시험"),
+    ("인증시험(명칭)", "매경TEST를 준비하며 경제 개념을 정리함", "매경TEST"),
+    ("인증시험(한자)", "한자능력검정시험을 준비하며 한자 어원을 조사함", "한자능력검정시험"),
+    ("자격증 확장", "정보처리기능사 필기 준비와 병행해 알고리즘을 학습함", "정보처리기능사"),
+    ("자격증 확장(MOS)", "MOS 자격증을 취득함", "MOS"),
+    ("청소년단체", "보이스카우트 활동에서 야영 계획을 세움", "보이스카우트"),
+    ("청소년단체(RCY)", "RCY 단원으로 헌혈 캠페인 홍보물을 제작함", "RCY"),
+    ("청소년단체(적십자)", "청소년적십자 활동으로 응급처치를 익힘", "청소년적십자"),
 ]
 
 
@@ -160,6 +171,10 @@ _STRICT_NEGATIVE_TEXTS = [
     "모둠 활동에서 자료 조사를 맡아 근거를 정리하고 발표함",
     "진학할 대학교를 스스로 탐색하며 관심 분야를 넓힘",
     "지역 하천의 수질 자료를 수집해 그래프로 표현함",
+    # 맨 '적십자'는 청소년단체명이 아니라 일반 기관·봉사 맥락으로도 쓰이므로
+    # 규칙은 '청소년적십자' 전체 표현만 잡아야 한다.
+    "적십자사에서 배운 응급처치 절차를 정리해 발표함",
+    "감사한 마음을 담아 모둠원에게 편지를 써서 전달함",
 ]
 
 
@@ -171,6 +186,24 @@ def test_rule_filter_strict_patterns_no_false_positive(text):
 def test_rule_filter_latin_acronyms_are_case_sensitive():
     # 'who', 'un' 같은 영어 단어가 WHO/UN 기관명으로 오탐되지 않아야 한다.
     assert rule_based_filter("the student who is unable to stop") == []
+
+
+def test_rule_filter_mos_and_rcy_do_not_match_lowercase_substrings():
+    """3글자 약어 MOS/RCY는 (?-i:) 스코프 안에 있어 소문자 부분문자열을 잡지 않는다.
+
+    IGNORECASE 상태로 두면 'almost'/'atmosphere'의 'mos', 'mercy'의 'rcy'가
+    자격증·청소년단체로 오탐된다.
+    """
+    assert rule_based_filter("almost every mosaic in the atmosphere showed mercy") == []
+
+
+def test_rule_filter_certification_exam_names_have_no_english_collision():
+    """'매경TEST'/'TESAT'은 IGNORECASE여도 평범한 영단어와 충돌하지 않는다.
+
+    앞에 한글이 붙거나(매경) 5글자 라틴 토큰이라 부분문자열 오탐 위험이 없어
+    WHO/UN/MOS와 달리 (?-i:) 스코프를 씌우지 않았다 — 이 테스트가 그 판단의 근거다.
+    """
+    assert rule_based_filter("the latest test protest contest of the season") == []
 
 
 def test_parse_custom_words_splits_on_comma_and_newline():
