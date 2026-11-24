@@ -58,7 +58,8 @@ class _GeminiModel:
             system_instruction=self._system_instruction, **kwargs
         )
 
-    def generate_content(self, prompt: str, model_name: str | None = None):
+    def generate_content(self, prompt: "str | list", model_name: str | None = None):
+        # prompt는 문자열 또는 [Part(이미지/PDF)..., 지시문 문자열] 리스트 (contents= 그대로 전달)
         try:
             return self._client.models.generate_content(
                 model=model_name or get_active_model(),
@@ -214,14 +215,16 @@ SYSTEM_PROMPT = """너는 교육부 '학교생활기록부 기재요령'을 완�
 - 각 항목은 다음 6개의 키를 반드시 포함한다:
   "word": 원문에서 발견된 표현 그대로 (원문 텍스트와 완전히 동일한 문자열)
   "reason": 위반 사유 (위 9가지 기준 중 해당 항목)
-  "basis": 해당 위반이 근거하는 기재요령 심사 기준(위 9가지 중 해당 항목명)을 짧게
+  "basis": 해당 위반이 근거하는 기재요령 심사 기준(위 9가지 중 해당 항목명)을 짧게.
+           끝에 근거 쪽수를 괄호로 붙인다 — 1~8번 기준은 "(2026 기재요령 p.18-19)",
+           9번 기준은 "(2026 기재요령 p.118·149)". 그 밖의 쪽수는 지어내지 않는다.
   "severity": "위반"(명백한 기재 금지) 또는 "주의"(맥락상 문제 소지)
   "suggestion_1": 학생의 희망 진로와 연결한 대체 표현 1
   "suggestion_2": 학생의 희망 진로와 연결한 대체 표현 2
 - 위반 사항이 없으면 빈 배열 []을 반환한다.
 
 [출력 예시]
-[{"word": "의사인 아버지", "reason": "부모의 직업 암시", "basis": "부모의 직업/사회적 지위 암시 표현", "severity": "위반", "suggestion_1": "가족의 헌신을 보며", "suggestion_2": "생명 존중의 가치를 배우며"}]
+[{"word": "의사인 아버지", "reason": "부모의 직업 암시", "basis": "부모의 직업/사회적 지위 암시 표현 (2026 기재요령 p.18-19)", "severity": "위반", "suggestion_1": "가족의 헌신을 보며", "suggestion_2": "생명 존중의 가치를 배우며"}]
 """
 
 
@@ -726,3 +729,106 @@ def adjust_length_with_gemini(text: str, target_len: int, api_key: str) -> str:
         )
         result = _gemini_text(model, retry_prompt)
     return result
+
+
+# ──────────────────────────────────────────────
+# Gemini 이미지 전사 (학생부 캡처·사진·스캔 PDF → 텍스트)
+# ──────────────────────────────────────────────
+TRANSCRIBE_SYSTEM_PROMPT = """너는 학교생활기록부 캡처·사진·스캔 문서의 글자를 그대로 옮겨 적는 전사(轉寫) 담당자다.
+옮겨 적은 글은 교사가 오탈자·기재 금지 표현을 검토하는 데 쓰이므로, 원문과 한 글자도 달라서는 안 된다.
+
+[전사 원칙 — 반드시 준수]
+1. 원문 그대로 전사한다. 오탈자·띄어쓰기·맞춤법·문장부호를 절대 고치지 않는다(교정 금지).
+   틀린 글자, 잘못 띄어 쓴 곳, 빠진 마침표, 겹친 공백도 보이는 그대로 옮긴다.
+2. 읽기 불확실한 글자는 추측하지 말고 한 글자마다 ⟦?⟧로 표시한다.
+3. 표 머리글(과목·세부능력 및 특기사항 등 칸 제목), 쪽번호, 워터마크, 출력 일시·머리말·꼬리말은 제외한다.
+4. 각 과목의 세부능력 및 특기사항은 "과목명: 내용" 형식의 한 줄 블록으로 출력한다.
+   학기 표기가 있으면 "(1학기)과목명: 내용"처럼 앞에 붙인다. 과목 사이에는 빈 줄을 하나 둔다.
+   과목 구분이 없는 글이면 본문만 그대로 옮긴다.
+5. 한 과목 내용이 여러 줄로 줄바꿈되어 있어도 한 줄로 이어 붙이되, 줄 끝 낱말 사이에는 원문대로
+   띄어쓰기 한 칸을 둔다(원문에 없는 글자를 더하지 않는다).
+6. 해석·요약·설명·인사말·마크다운 서식을 붙이지 않는다. 전사본만 출력한다.
+"""
+
+VERIFY_SYSTEM_PROMPT = """너는 학교생활기록부 이미지와 그 전사본을 한 글자씩 대조하는 검수자다.
+전사본이 이미지와 다른 곳(글자·띄어쓰기·문장부호·누락·추가)을 모두 찾아라.
+이미지 속 원문의 오탈자를 교정하려 하지 말고, 오직 '이미지와 전사본의 차이'만 보고한다.
+
+[출력 규칙 - 반드시 준수]
+- JSON 배열로만 반환한다. 다른 설명을 붙이지 않는다.
+- 각 항목: {"transcript": "전사본의 해당 부분 그대로", "image": "이미지에 실제로 보이는 글자", "note": "차이 설명 한 줄"}
+- 차이가 없으면 빈 배열 []을 반환한다.
+"""
+
+
+def _to_parts(parts) -> list:
+    """(bytes, mime) 튜플 또는 genai Part 목록을 genai Part 목록으로 바꾼다."""
+    out = []
+    for p in parts or []:
+        if isinstance(p, tuple):
+            data, mime = p
+            out.append(genai_types.Part.from_bytes(data=data, mime_type=mime))
+        else:
+            out.append(p)
+    return out
+
+
+def _make_vision_model(api_key: str, system_instruction: str, json_mode: bool = False):
+    """이미지 판독용 모델: temperature 0, 사고 끔, (SDK가 지원하면) 고해상도 판독."""
+    config: dict = {
+        "temperature": 0.0,
+        "thinking_config": genai_types.ThinkingConfig(thinking_budget=0),
+    }
+    if json_mode:
+        config["response_mime_type"] = "application/json"
+    try:
+        high = genai_types.MediaResolution.MEDIA_RESOLUTION_HIGH
+        genai_types.GenerateContentConfig(media_resolution=high)  # 지원 여부 확인
+        config["media_resolution"] = high
+    except Exception:
+        pass  # 구버전 SDK: 기본 해상도로 진행
+    return _GeminiModel(api_key, system_instruction, config)
+
+
+def transcribe_images_with_gemini(parts, api_key: str) -> str:
+    """학생부 이미지·스캔 PDF를 교정 없이 그대로 전사한 텍스트를 돌려준다.
+
+    parts: (bytes, mime) 튜플 또는 genai Part 목록. 비어 있으면 호출하지 않고 ValueError.
+    """
+    contents = _to_parts(parts)
+    if not contents:
+        raise ValueError("읽을 이미지(또는 PDF)가 없습니다.")
+    model = _make_vision_model(api_key, TRANSCRIBE_SYSTEM_PROMPT)
+    instruction = (
+        "위 이미지(또는 PDF)의 글자를 전사 원칙에 따라 원문 그대로 옮겨 적어라. "
+        "오탈자·띄어쓰기를 고치지 말고, 불확실한 글자는 ⟦?⟧로 표시하고, "
+        "과목별로 '과목명: 내용' 형식으로 전사본만 출력하라."
+    )
+    raw = _gemini_text(model, contents + [instruction])
+    return re.sub(r"^```[a-z]*\s*|\s*```$", "", raw.strip()).strip()
+
+
+def verify_transcription_with_gemini(parts, transcript: str, api_key: str) -> list[dict]:
+    """이미지와 전사본을 대조해 불일치 목록 [{transcript, image, note}]을 돌려준다."""
+    contents = _to_parts(parts)
+    if not contents:
+        raise ValueError("대조할 이미지(또는 PDF)가 없습니다.")
+    if not (transcript or "").strip():
+        raise ValueError("대조할 전사본이 비어 있습니다.")
+    model = _make_vision_model(api_key, VERIFY_SYSTEM_PROMPT, json_mode=True)
+    instruction = (
+        f"[전사본]\n{transcript}\n\n"
+        "위 이미지와 전사본을 한 글자씩 대조해 차이를 JSON 배열로만 답하라."
+    )
+    parsed = _gemini_json(model, contents + [instruction])
+    if not isinstance(parsed, list):
+        raise ValueError("Gemini 응답이 JSON 배열 형식이 아닙니다.")
+    return [
+        {
+            "transcript": str(i.get("transcript", "")).strip(),
+            "image": str(i.get("image", "")).strip(),
+            "note": str(i.get("note", "")).strip(),
+        }
+        for i in parsed
+        if isinstance(i, dict) and (i.get("transcript") or i.get("image"))
+    ]

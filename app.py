@@ -37,6 +37,7 @@ from core.formatting import (
 )
 from core.gemini import (
     MODEL_CHOICES,
+    GeminiCreditError,
     adjust_length_with_gemini,
     assess_quality_with_gemini,
     category_for_neis_item,
@@ -50,6 +51,8 @@ from core.gemini import (
     rewrite_with_gemini,
     set_active_model,
     summarize_activity_with_gemini,
+    transcribe_images_with_gemini,
+    verify_transcription_with_gemini,
 )
 from core.masking import (
     apply_mask,
@@ -72,9 +75,25 @@ from core.parsing import (
     split_by_subject,
     unique_names,
 )
+from core.ocr import (
+    ALLOWED_EXTENSIONS,
+    UNCERTAIN_MARK,
+    count_uncertain,
+    mime_for_name,
+    prepare_image,
+    validate_uploads,
+)
+from core.privacy import scan_identifying_risks
 from core.project import replace_in_entries
+from core.report import (
+    REPORT_COLUMNS,
+    build_issue_report,
+    report_table_rows,
+    summarize_report,
+)
 from core.rules import (
     NEIS_LIMITS,
+    RULES_BASIS_LABEL,
     filter_ignored,
     find_shared_sentences,
     find_similar_pairs,
@@ -325,6 +344,198 @@ def render_style_warnings(text: str) -> None:
 
 
 # ──────────────────────────────────────────────
+# 통합 오류 리포트(줄·문장별) / AI 윤문 최종 확인 체크리스트
+# ──────────────────────────────────────────────
+def effective_ignored(findings: list[dict], widget_key: str) -> set[str]:
+    """오탐 무시 목록. 같은 실행에서 아직 반영되지 않은 무시 위젯 선택값까지 합친다."""
+    ignored = set(st.session_state.get("ignored_words", []))
+    if widget_key in st.session_state:
+        options = {f.get("word", "") for f in findings if f.get("word")}
+        ignored = (ignored - options) | set(st.session_state[widget_key])
+    return ignored
+
+
+def render_issue_report(
+    text: str,
+    findings: list[dict],
+    proofread_items: list[dict],
+    segments,
+    ignored: set[str],
+    key: str,
+) -> list[dict]:
+    """모든 점검 결과를 줄·문장 위치 기준 한 표로 보여 주고 CSV로 내려받게 한다."""
+    rows = build_issue_report(text, findings, proofread_items, segments, ignored)
+    st.subheader("📋 오류 리포트(줄·문장별)")
+    st.caption(
+        f"{RULES_BASIS_LABEL} · 줄 번호는 원문 전체 기준 · "
+        "판정은 참고용이며 최종 판단은 교사가 합니다."
+    )
+    if not rows:
+        st.success("✅ 점검 항목에서 발견된 문제가 없습니다.")
+        return rows
+    st.info(summarize_report(rows))
+    df = pd.DataFrame(report_table_rows(rows), columns=list(REPORT_COLUMNS))
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "📥 오류 리포트 CSV 다운로드",
+        data=df.to_csv(index=False).encode("utf-8-sig"),
+        file_name="오류리포트_줄문장별.csv",
+        mime="text/csv",
+        key=f"dl_report_{key}",
+    )
+    return rows
+
+
+def render_final_checklist(key: str) -> None:
+    """생성형 AI 결과물 최종 입력 전 확인 체크리스트 (안내용, 강제 아님)."""
+    with st.expander("✅ 최종 입력 전 확인(기재요령 p.19)"):
+        st.caption(
+            "생성형 AI로 만든 결과를 그대로 입력하는 것은 금지되며, 윤문 등 보조로 활용했다면 "
+            "최종 입력 전 아래 사항을 확인해야 합니다. (안내용 — 체크하지 않아도 사용할 수 있습니다)"
+        )
+        st.checkbox("학생의 실제 수행과 일치하며 허위·과장이 없음", key=f"final_chk1_{key}")
+        st.checkbox("기재요령 유의사항(기재 불가 사항 등)을 준수함", key=f"final_chk2_{key}")
+        st.checkbox("교사가 직접 관찰·평가한 내용임", key=f"final_chk3_{key}")
+
+
+# ──────────────────────────────────────────────
+# 이미지로 읽기 (학생부 캡처·사진·스캔 PDF → Gemini 전사)
+# ──────────────────────────────────────────────
+IMAGE_INPUT_METHOD = "이미지로 읽기 (캡처·사진·스캔)"
+
+IMAGE_CONSENT_NOTICE = (
+    "**이미지 읽기 전 꼭 확인하세요.**\n\n"
+    "- 올린 이미지(또는 PDF)는 글자를 읽기 위해 **Google Gemini API(외부 서버)로 전송**됩니다. "
+    "이미지 속 글자에는 개인정보 자동 마스킹이 적용되지 않습니다.\n"
+    "- **무료 API 키**는 Google 약관상 입력 내용이 제품 개선에 사용되고 사람이 검토할 수 있습니다. "
+    "학생부 이미지는 **유료(결제 활성) 키 환경에서만** 사용하세요.\n"
+    "- 올리기 전에 **학생 이름·학번·학교명 등은 가리고** 올려 주세요."
+)
+
+
+def _image_parts(files) -> tuple[list[tuple[bytes, str]], list[tuple[str, bytes | None]]]:
+    """업로드 파일을 검증·전처리해 (Gemini 전송용 parts, 미리보기 목록)을 돌려준다."""
+    validate_uploads([(f.name, f.size) for f in files])
+    parts: list[tuple[bytes, str]] = []
+    previews: list[tuple[str, bytes | None]] = []
+    for f in files:
+        data, mime = prepare_image(f.getvalue(), mime_for_name(f.name))
+        parts.append((data, mime))
+        # 미리보기는 축소·재인코딩된 이미지만 보관한다(PDF는 파일명만).
+        previews.append((f.name, data if mime.startswith("image/") else None))
+    return parts, previews
+
+
+def render_image_input(api_key: str) -> str:
+    """동의 → 업로드 → 글자 읽기 → 미리보기·전사본 편집 → (선택) 대조 검증. 전사본을 돌려준다."""
+    st.warning(IMAGE_CONSENT_NOTICE)
+    consent = st.checkbox(
+        "위 내용을 확인했으며, 개인정보를 가린 이미지만 올리겠습니다.",
+        key="image_consent",
+    )
+    img_files = st.file_uploader(
+        "학생부 캡처·사진(png·jpg·webp) 또는 스캔 PDF — 최대 10개, 파일당 15MB, 합계 18MB",
+        type=list(ALLOWED_EXTENSIONS),
+        accept_multiple_files=True,
+        key="image_files",
+        disabled=not consent,
+    )
+    if not consent:
+        st.caption("☝️ 위 안내에 동의하면 파일을 올릴 수 있습니다.")
+
+    if st.button(
+        "🔎 글자 읽기",
+        key="btn_transcribe",
+        use_container_width=True,
+        disabled=not (consent and img_files),
+    ):
+        if not api_key.strip():
+            st.warning("⚠️ 서버에 Gemini API Key가 설정되지 않아 실행할 수 없습니다.")
+        else:
+            try:
+                parts, previews = _image_parts(img_files)
+                with st.spinner(f"이미지에서 글자를 읽는 중… ({get_active_model()})"):
+                    transcript = transcribe_images_with_gemini(parts, api_key)
+                # 전사본 text_area(key=image_transcript)보다 먼저 실행되므로 값 지정이 허용된다.
+                st.session_state["image_transcript"] = transcript
+                st.session_state["image_previews"] = previews
+                st.session_state.pop("image_verify", None)
+                record_history("이미지 글자 읽기", transcript)
+            except GeminiCreditError as e:
+                st.error(f"❌ {e}")
+            except ValueError as e:
+                st.error(f"❌ {e}")
+            except Exception as e:
+                st.error(f"❌ Gemini API 호출 실패: {e}")
+
+    if "image_transcript" not in st.session_state:
+        return ""
+
+    col_img, col_txt = st.columns(2)
+    with col_img:
+        st.markdown("**원본 이미지**")
+        for name, data in st.session_state.get("image_previews", []):
+            if data:
+                st.image(data, caption=name, width="stretch")
+            else:
+                st.caption(f"📄 {name} (PDF — 미리보기 없음)")
+    with col_txt:
+        st.markdown("**전사본 (이미지와 대조해 직접 고칠 수 있습니다)**")
+        transcript = st.text_area(
+            "전사본",
+            key="image_transcript",
+            height=420,
+            label_visibility="collapsed",
+        )
+
+    n_unsure = count_uncertain(transcript)
+    if n_unsure:
+        st.warning(
+            f"⚠️ 읽기 불확실한 글자 {UNCERTAIN_MARK} **{n_unsure}개**가 남아 있습니다. "
+            "이미지와 대조해 수정한 뒤 검토를 실행하세요."
+        )
+    elif transcript.strip():
+        st.caption(f"✅ 읽기 불확실 표시({UNCERTAIN_MARK}) 없음 — 그래도 원본과 한 번 대조해 주세요.")
+    st.caption(
+        "ℹ️ 전사본은 원문의 오탈자·띄어쓰기를 고치지 않고 그대로 옮기도록 요청합니다. "
+        "아래 🔍 검토 실행은 이 전사본을 그대로 검토합니다(개인정보 자동 마스킹 적용)."
+    )
+
+    if st.button(
+        "🧐 대조 검증 (선택 — 이미지와 전사본 차이 찾기)",
+        key="btn_verify_transcript",
+        disabled=not (img_files and transcript.strip()),
+    ):
+        try:
+            parts, _ = _image_parts(img_files)
+            with st.spinner(f"이미지와 전사본을 대조하는 중… ({get_active_model()})"):
+                st.session_state["image_verify"] = verify_transcription_with_gemini(
+                    parts, transcript, api_key
+                )
+        except GeminiCreditError as e:
+            st.error(f"❌ {e}")
+        except ValueError as e:
+            st.error(f"❌ {e}")
+        except Exception as e:
+            st.error(f"❌ Gemini API 호출 실패: {e}")
+
+    diffs = st.session_state.get("image_verify")
+    if diffs is not None:
+        if diffs:
+            st.warning(f"이미지와 다른 곳 **{len(diffs)}건** — 전사본을 직접 고쳐 주세요.")
+            st.dataframe(
+                pd.DataFrame(diffs).rename(
+                    columns={"transcript": "전사본", "image": "이미지", "note": "설명"}
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.success("✅ 대조 결과 이미지와 다른 곳을 찾지 못했습니다.")
+    return transcript
+
+
+# ──────────────────────────────────────────────
 # 학생 간 유사도 검사 결과 표시
 # ──────────────────────────────────────────────
 def render_similarity_check(items: list[tuple[str, str]]) -> None:
@@ -483,6 +694,8 @@ def render_proofread_block(
                         it["wrong"] = remove_mask(it["wrong"], mask_map)
                         it["correct"] = remove_mask(it["correct"], mask_map)
                     st.session_state[state_key] = items
+                    # 위쪽 오류 리포트(줄·문장별)가 새 결과를 반영하도록 다시 그린다.
+                    st.rerun()
                 except Exception as e:
                     st.error(f"❌ 오탈자 검사 실패: {e}")
 
@@ -790,8 +1003,13 @@ def render_subject_sections(
     neis_limit: int,
     key_prefix: str,
     csv_name: str = "생기부_심사결과.csv",
+    report_rows: list[dict] | None = None,
 ) -> None:
-    """과목별 세그먼트마다 검출 결과·문체 점검·오탈자 검사를 expander로 묶어 표시한다."""
+    """과목별 세그먼트마다 검출 결과·문체 점검·오탈자 검사를 expander로 묶어 표시한다.
+
+    report_rows(통합 오류 리포트)가 주어지면 과목마다 해당 과목 행만 같은 형식으로 보여 준다.
+    줄 번호는 과목 본문이 아니라 원문 전체 기준이다.
+    """
     grouped = group_findings_by_subject(findings)
     n_violation = sum(1 for f in findings if f.get("severity", "위반") == "위반")
     st.info(
@@ -817,6 +1035,20 @@ def render_subject_sections(
 
             for w in style_check(content):
                 st.warning(w)
+
+            if report_rows is not None:
+                sub_rows = [r for r in report_rows if r["subject"] == subject]
+                if sub_rows:
+                    st.caption(
+                        f"📋 이 과목 오류 리포트 {len(sub_rows)}건 (줄 번호는 원문 전체 기준)"
+                    )
+                    st.dataframe(
+                        pd.DataFrame(
+                            report_table_rows(sub_rows), columns=list(REPORT_COLUMNS)
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
             # 세션 키를 과목별로 분리해 과목마다 독립적으로 오탈자 검사를 돌린다.
             render_proofread_block(content, api_key, mask_map, f"{key_prefix}__{idx}")
@@ -1057,6 +1289,10 @@ with st.sidebar:
         "🔒 입력한 생기부·자기평가서 텍스트는 **Google Gemini API(외부 서버)로 전송**됩니다. "
         "학생 이름·학번 등 개인정보는 아래 마스킹 목록에 등록하세요."
     )
+    st.caption(
+        "🔑 Gemini **유료(결제 활성) 키** 사용을 전제로 합니다 — 무료 키는 약관상 입력이 "
+        "제품 개선에 쓰이고 사람이 검토할 수 있습니다."
+    )
     mask_words_raw = st.text_area(
         "개인정보 마스킹 단어 (선택)",
         height=68,
@@ -1116,12 +1352,14 @@ with st.sidebar:
         "사용자 정의 금칙어 (선택)",
         height=90,
         placeholder="쉼표 또는 줄바꿈으로 구분\n예) 홍성여고, ○○학원, △△대학교",
-        help="학교명 등 반드시 걸러야 할 단어를 등록하면 규칙 기반 검출에 추가됩니다.",
+        help="학교명 등 반드시 걸러야 할 단어를 등록하면 규칙 기반 검출에 추가됩니다. "
+        "우리 학교 이름·별칭·축제명을 등록하세요(기재요령 p.18-19 블라인드).",
         key="custom_words_raw",
     )
     custom_words = parse_custom_words(custom_words_raw)
 
     st.divider()
+    st.caption(f"📘 {RULES_BASIS_LABEL}")
     st.markdown(
         "**심사 기준 (8가지)**\n"
         "1. 상업적 명칭/브랜드\n"
@@ -1196,6 +1434,47 @@ def render_auto_mask_note(auto_words: list[str]) -> None:
         st.caption("🛡️ 자동 마스킹 적용: " + ", ".join(auto_words))
 
 
+def render_send_preview(text: str) -> bool:
+    """검토 실행 전 '실제 전송 텍스트(마스킹 후)'와 식별 위험 신호를 보여 준다.
+
+    위험 신호가 있으면 확인 체크박스를 띄우고, 체크했을 때만 True(실행 허용)를 돌려준다.
+    위험 신호가 0건이면 게이트 없이 True. 본문이 바뀌면 확인 체크는 초기화된다.
+    """
+    send_map, send_auto = masked_ctx([text, major])
+    masked = apply_mask(text, send_map)
+    risks = scan_identifying_risks(masked, [w for w, _ in send_map])
+    label = "📤 실제로 전송되는 텍스트(마스킹 적용 후)"
+    if risks:
+        label += f" — ⚠️ 위험 신호 {len(risks)}건"
+    with st.expander(label, expanded=False):
+        render_auto_mask_note(send_auto)
+        st.text(masked[:3000] + ("…" if len(masked) > 3000 else ""))
+        if risks:
+            st.dataframe(
+                pd.DataFrame(
+                    [{"구분": r["kind"], "표현": r["text"], "조언": r["advice"]} for r in risks]
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.caption("✅ 학생·학교를 특정할 만한 위험 신호를 찾지 못했습니다.")
+    if not risks:
+        return True
+
+    # 본문이 바뀌면 이전 확인은 무효 — 위젯 생성 전에 체크 값을 지운다.
+    sig = hash(masked)
+    if st.session_state.get("risk_ack_sig") != sig:
+        st.session_state.pop("risk_ack", None)
+        st.session_state["risk_ack_sig"] = sig
+    kinds = ", ".join(dict.fromkeys(r["kind"] for r in risks))
+    st.warning(
+        f"⚠️ 전송될 텍스트에 학생·학교를 특정할 수 있는 위험 신호 **{len(risks)}건**({kinds})이 "
+        "있습니다. 위 미리보기에서 확인하고, 필요하면 마스킹 목록에 등록하거나 표현을 고쳐 주세요."
+    )
+    return st.checkbox("위험 신호를 확인했고 그대로 전송합니다", key="risk_ack")
+
+
 # ── 모드 선택 ──
 mode = st.radio(
     "모드를 선택하세요.",
@@ -1220,7 +1499,11 @@ if mode == "🔍 기재 금지 표현 검토":
 
     input_method = st.radio(
         "입력 방식을 선택하세요.",
-        ["파일 업로드 (.txt / .hwp / .hwpx / .docx / .pdf / 명렬표 .csv·.xlsx — 여러 개 가능)", "직접 붙여넣기"],
+        [
+            "파일 업로드 (.txt / .hwp / .hwpx / .docx / .pdf / 명렬표 .csv·.xlsx — 여러 개 가능)",
+            "직접 붙여넣기",
+            IMAGE_INPUT_METHOD,
+        ],
         horizontal=True,
     )
 
@@ -1308,9 +1591,17 @@ if mode == "🔍 기재 금지 표현 검토":
                 with st.expander("업로드된 원문 미리보기"):
                     st.text(input_text[:2000] + ("…" if len(input_text) > 2000 else ""))
             except Exception as e:
-                st.error(f"❌ 파일에서 텍스트를 추출하지 못했습니다: {e}")
+                scan_hint = (
+                    f" 💡 스캔한 PDF라면 입력 방식에서 **{IMAGE_INPUT_METHOD}**를 골라 "
+                    "PDF를 올려 보세요."
+                    if "스캔" in str(e)
+                    else ""
+                )
+                st.error(f"❌ 파일에서 텍스트를 추출하지 못했습니다: {e}{scan_hint}")
         elif len(review_files) > 1:
             st.info(f"📚 파일 **{len(review_files)}개** 업로드됨 — 반 전체 일괄 검토 모드")
+    elif input_method == IMAGE_INPUT_METHOD:
+        input_text = render_image_input(api_key)
     else:
         input_text = st.text_area(
             "생기부 내용을 붙여넣으세요.",
@@ -1323,7 +1614,16 @@ if mode == "🔍 기재 금지 표현 검토":
     if input_text.strip():
         render_mask_suggestions([input_text], mask_words_raw, "mode1_input")
 
-    run = st.button("🔍 검토 실행", type="primary", use_container_width=True)
+    # 전송 전 개인정보 가드 — 단일 검토(붙여넣기·단일 파일·이미지 전사본)만 적용.
+    # 일괄 모드(여러 파일·명렬표)는 input_text가 비어 있어 게이트가 없다(기존 마스킹 유지).
+    send_ok = render_send_preview(input_text) if input_text.strip() else True
+
+    run = st.button(
+        "🔍 검토 실행",
+        type="primary",
+        use_container_width=True,
+        disabled=not send_ok,
+    )
 
     if run:
         if not api_key.strip():
@@ -1447,8 +1747,27 @@ if mode == "🔍 기재 금지 표현 검토":
         rev_map, rev_auto = masked_ctx([review["text"], major])
         render_auto_mask_note(rev_auto)
 
-        render_length_metrics(review["text"], neis_limit)
         review_segments = review.get("segments") or []
+        # 통합 오류 리포트(줄·문장별) — 모든 점검 결과를 원문 전체 기준 위치로 한 표에 모은다.
+        if len(review_segments) > 1:
+            report_proof = [
+                it
+                for idx in range(len(review_segments))
+                for it in (st.session_state.get(f"proofread_review__{idx}") or [])
+            ]
+        else:
+            report_proof = st.session_state.get("proofread_review") or []
+        report_rows = render_issue_report(
+            review["text"],
+            review["findings"],
+            report_proof,
+            review_segments,
+            effective_ignored(review["findings"], "ign_single"),
+            "single",
+        )
+        st.divider()
+
+        render_length_metrics(review["text"], neis_limit)
         if len(review_segments) > 1:
             # 과목별 분류 모드 — 과목마다 검출·문체·오탈자를 따로 보여 준다.
             findings = render_ignore_control(review["findings"], "ign_single")
@@ -1459,6 +1778,7 @@ if mode == "🔍 기재 금지 표현 검토":
                 rev_map,
                 neis_limit,
                 "proofread_review",
+                report_rows=report_rows,
             )
         else:
             render_style_warnings(review["text"])
@@ -1489,6 +1809,7 @@ if mode == "🔍 기재 금지 표현 검토":
             revised = st.session_state.get("revised_text", "")
             if revised:
                 st.text_area("수정본 (복사해서 사용하세요)", value=revised, height=250)
+                render_final_checklist("revised")
                 render_undo_button("revised_text", "수정본", "undo_revised")
                 render_length_metrics(revised, neis_limit)
                 # 수정본에도 개인정보가 남아 있을 수 있으므로 원문+수정본으로 다시 확장
@@ -2381,6 +2702,7 @@ else:
         st.subheader("2️⃣ 생성된 세특 초안")
 
         st.text_area("초안 (복사해서 사용하세요)", value=draft, height=280)
+        render_final_checklist("draft")
         render_undo_button("draft_text", "초안", "undo_draft")
         render_length_metrics(draft, neis_limit)
         # 이 초안에 대한 확장 마스킹 맵 (분량 조절·품질·오탈자가 공유)
