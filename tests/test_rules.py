@@ -229,7 +229,8 @@ def test_style_check_flags_cliche():
 
 
 def test_style_check_clean_text_returns_empty():
-    assert style_check("데이터를 수집하여 그래프로 표현하고 원인을 고찰함") == []
+    # 마침표 없는 명사형 종결 문장은 '마침표 누락(추정)' 권고가 붙으므로 마침표까지 갖춘 문장으로 본다.
+    assert style_check("데이터를 수집하여 그래프로 표현하고 원인을 고찰함.") == []
 
 
 # ── style_check: 따옴표/괄호 짝 검사 ──

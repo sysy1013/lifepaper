@@ -88,7 +88,9 @@ from core.security import register_secret, safe_error
 from core.project import replace_in_entries
 from core.report import (
     REPORT_COLUMNS,
+    JUDGMENT_BADGE,
     build_issue_report,
+    count_judgment_rows,
     report_table_rows,
     summarize_report,
 )
@@ -375,6 +377,13 @@ def render_issue_report(
         st.success("✅ 점검 항목에서 발견된 문제가 없습니다.")
         return rows
     st.info(summarize_report(rows))
+    n_judged = count_judgment_rows(rows)
+    if n_judged:
+        st.caption(
+            f"🧑‍🏫 '{JUDGMENT_BADGE}' {n_judged}건: 규정이 판단을 학교·교사에게 맡기거나 문장만으로 "
+            "위반 여부를 가릴 수 없는 항목입니다. 자동으로 기재 불가로 정하지 않았으니, "
+            "'오류 내용'의 확인 사항을 보고 학교 기준으로 판단해 주세요."
+        )
     df = pd.DataFrame(report_table_rows(rows), columns=list(REPORT_COLUMNS))
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.download_button(
@@ -1891,7 +1900,7 @@ if mode == "🔍 기재 금지 표현 검토":
                     "revised_text", api_key, rev2_map, neis_limit, "revised"
                 )
 
-                recheck = rule_based_filter(revised, custom_words)
+                recheck = rule_based_filter(revised, custom_words, include_hints=False)
                 if recheck:
                     st.warning(
                         "⚠️ 수정본에서 규칙 기반 금지 패턴이 여전히 검출됩니다: "
@@ -2253,7 +2262,7 @@ if mode == "🔍 기재 금지 표현 검토":
                         height=180,
                         key=f"batch_revised_{b['name']}",
                     )
-                    recheck = rule_based_filter(b["revised"], custom_words)
+                    recheck = rule_based_filter(b["revised"], custom_words, include_hints=False)
                     if recheck:
                         st.warning(
                             "⚠️ 수정본에서 규칙 기반 금지 패턴이 여전히 검출됩니다: "
@@ -2790,7 +2799,7 @@ else:
         )
         render_style_warnings(draft)
 
-        draft_findings = rule_based_filter(draft, custom_words)
+        draft_findings = rule_based_filter(draft, custom_words, include_hints=False)
         if draft_findings:
             st.warning(
                 "⚠️ 초안에서 규칙 기반 금지 패턴이 검출되었습니다: "
@@ -2982,7 +2991,7 @@ else:
                 st.text_area(
                     "초안", value=b["draft"], height=200, key=f"batch_{b['name']}"
                 )
-                findings = rule_based_filter(b["draft"], custom_words)
+                findings = rule_based_filter(b["draft"], custom_words, include_hints=False)
                 if findings:
                     st.warning(
                         "⚠️ 규칙 기반 금지 패턴 검출: "

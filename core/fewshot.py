@@ -67,7 +67,12 @@ def select_fewshots(text: str, k: int = 6, hint_categories=()) -> list[dict]:
         if e not in chosen:
             chosen.append(e)
     if k >= 3 and not any(e["verdict"] == "기재 가능" for e in chosen):
-        allowed = next((e for e in scored if e["verdict"] == "기재 가능"), None)
+        # 범주 다양성을 지키려고, 남는 예시들과 범주가 겹치지 않는 '기재 가능' 예시를 먼저 고른다
+        kept_cats = {e["category"] for e in chosen[:-1]}
+        allowed = next(
+            (e for e in scored if e["verdict"] == "기재 가능" and e["category"] not in kept_cats),
+            None,
+        ) or next((e for e in scored if e["verdict"] == "기재 가능"), None)
         if allowed is not None:
             chosen[-1] = allowed
     return chosen

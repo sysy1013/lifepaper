@@ -18,6 +18,10 @@ VERDICT_CHECK = "확인 필요"
 VERDICT_FIX = "수정 필요"
 VERDICT_ADVICE = "권고"
 VERDICT_ORDER = (VERDICT_BANNED, VERDICT_CHECK, VERDICT_FIX, VERDICT_ADVICE)
+# '확인 필요' 중 학교·교사 판단으로 넘긴 항목(힌트 규칙·문맥 확인 띄어쓰기)에 붙는 배지
+JUDGMENT_BADGE = "교사 판단 필요"
+# 명문 규정 없이 추정으로 잡는 서식 항목 → 권고
+_ADVICE_RULES = frozenset({"format_missing_period"})
 
 _CATEGORY_VERDICT = {
     "맞춤법": VERDICT_FIX,
@@ -129,7 +133,8 @@ def build_issue_report(
     rows: list[dict] = []
     seen: set[tuple] = set()
 
-    def add_row(start, end, subject, category, problem, suggestion, basis, exception, verdict, word, rule_id):
+    def add_row(start, end, subject, category, problem, suggestion, basis, exception, verdict, word, rule_id,
+                judgment=""):
         key = (start, end, rule_id, problem)
         if key in seen:
             return
@@ -156,6 +161,7 @@ def build_issue_report(
                 "exception": exception,
                 "verdict": verdict,
                 "rule_id": rule_id,
+                "judgment": judgment if verdict == VERDICT_CHECK else "",
             }
         )
 
@@ -170,6 +176,7 @@ def build_issue_report(
         basis = entry.get("source", "") if rule_id != "gemini_other" else (f.get("basis") or entry.get("source", ""))
         sugg = " / ".join(s for s in (f.get("suggestion_1"), f.get("suggestion_2")) if s)
         f_subject = f.get("subject") or ""
+        judgment = f.get("judgment") or (entry.get("summary", "") if entry.get("judgment") else "")
         lo, hi = 0, len(text)
         if ranges and f_subject:
             for subj, s, e in ranges:
@@ -185,7 +192,7 @@ def build_issue_report(
             )
             if not excluded:
                 add_row(None, None, f_subject, "기재금지", f.get("reason", ""), sugg,
-                        basis, exception, verdict, word, rule_id)
+                        basis, exception, verdict, word, rule_id, judgment)
             continue
         for pos in positions:
             subject = f_subject or _subject_at(ranges, pos)
@@ -195,7 +202,7 @@ def build_issue_report(
             if excluded:
                 continue
             add_row(pos, pos + len(word), subject, "기재금지", f.get("reason", ""),
-                    sugg, basis, exception, verdict, word, rule_id)
+                    sugg, basis, exception, verdict, word, rule_id, judgment)
 
     # 2) 문체·서식·맞춤법·과장 점검 (과목 분리 시 과목 본문별로 점검하고 원문 오프셋으로 환산)
     blocks = [(subj, s, e) for subj, s, e in ranges] if ranges else [("", 0, len(text))]
@@ -208,11 +215,17 @@ def build_issue_report(
             entry = RULEBOOK.get(issue["rule_id"], {})
             if issue["category"] == "맞춤법":
                 local_spelling_spans.append((start, end))
+            judgment = issue.get("judgment", "")
+            if judgment:
+                verdict = VERDICT_CHECK
+            elif issue["rule_id"] in _ADVICE_RULES:
+                verdict = VERDICT_ADVICE
+            else:
+                verdict = _CATEGORY_VERDICT.get(issue["category"], VERDICT_ADVICE)
             add_row(
                 start, end, subj, issue["category"], issue["problem"], issue["suggestion"],
                 issue.get("basis") or entry.get("source", ""), entry.get("exceptions", ""),
-                _CATEGORY_VERDICT.get(issue["category"], VERDICT_ADVICE),
-                issue["word"], issue["rule_id"],
+                verdict, issue["word"], issue["rule_id"], judgment,
             )
 
     # 3) 이미지 전사본의 판독 불확실 표시(⟦?⟧) — 이미지와 대조해 직접 고쳐야 한다
@@ -251,13 +264,22 @@ def build_issue_report(
 def summarize_report(rows: list[dict]) -> str:
     """종합 판정 한 줄."""
     counts = {v: 0 for v in VERDICT_ORDER}
+    judged = 0
     for r in rows:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+        if r.get("judgment"):
+            judged += 1
     return (
         f"기재요령 기준 판정(참고) — {VERDICT_BANNED} {counts[VERDICT_BANNED]}건 · "
-        f"{VERDICT_CHECK} {counts[VERDICT_CHECK]}건 · {VERDICT_FIX} {counts[VERDICT_FIX]}건 · "
+        f"{VERDICT_CHECK} {counts[VERDICT_CHECK]}건(그중 {JUDGMENT_BADGE} {judged}건) · "
+        f"{VERDICT_FIX} {counts[VERDICT_FIX]}건 · "
         f"{VERDICT_ADVICE} {counts[VERDICT_ADVICE]}건 — 최종 판단은 교사"
     )
+
+
+def count_judgment_rows(rows: list[dict]) -> int:
+    """교사 판단 필요(힌트) 행 수."""
+    return sum(1 for r in rows if r.get("judgment"))
 
 
 REPORT_COLUMNS = ("줄", "문장", "과목", "구분", "원문", "오류 내용", "수정 제안", "근거", "판정")
@@ -270,6 +292,11 @@ def report_table_rows(rows: list[dict]) -> list[dict]:
         basis = r["basis"]
         if r["exception"]:
             basis = f"{basis} · 예외: {r['exception']}" if basis else f"예외: {r['exception']}"
+        problem = r["problem"]
+        verdict = r["verdict"]
+        if r.get("judgment"):
+            problem = f"{problem} — {JUDGMENT_BADGE}: {r['judgment']}"
+            verdict = f"{verdict} · {JUDGMENT_BADGE}"
         out.append(
             {
                 "줄": r["line"] if r["line"] is not None else "-",
@@ -277,10 +304,10 @@ def report_table_rows(rows: list[dict]) -> list[dict]:
                 "과목": r["subject"],
                 "구분": r["category"],
                 "원문": r["excerpt"],
-                "오류 내용": r["problem"],
+                "오류 내용": problem,
                 "수정 제안": r["suggestion"],
                 "근거": basis,
-                "판정": r["verdict"],
+                "판정": verdict,
             }
         )
     return out

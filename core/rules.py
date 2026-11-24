@@ -397,13 +397,15 @@ EXTRA_RULE_PATTERNS = [
     ),
     # MOOC·방과후학교 우회 서술
     (
-        r"온라인\s*공개\s*강좌|공개\s*온라인\s*강좌|방과\s+후\s*(?:학교|수업|강좌|프로그램|교실)"
+        r"온라인\s*공개\s*강좌|공개\s*온라인\s*강좌|방과\s*후\s*(?:학교|수업|강좌|프로그램|교실)"
         r"|(?:정규\s*)?수업이?\s*(?:끝난|마친)\s*(?:뒤|후)[가-힣\s]{0,12}?(?:강좌|프로그램)",
         "MOOC/방과후학교 활동 의심 (우회 표기)",
         f"기재요령: K-MOOC·MOOC·KOCW, 방과후학교 활동은 세특에 입력 불가 {_B_SETEUK}",
         "mooc_afterschool",
     ),
     # 연구보고서(소논문) 작성 — 허용 6과목은 rulebook 예외로 '확인 필요'
+    # (인덱스 고정: 아래 _PATTERN_VALIDATORS가 EXTRA_RULE_PATTERNS[n]을 참조하므로
+    #  새 패턴은 목록 끝에만 붙인다.)
     (
         r"연구\s?보고서(?:를|을)?\s*(?:작성|제출|완성|집필)",
         "연구보고서(소논문) 작성 표현 (세특 입력 불가, 지정 6개 과목 예외 존재)",
@@ -416,6 +418,16 @@ EXTRA_RULE_PATTERNS = [
         "영재·발명교육 관련 표현 (영재·발명교육 기록사항에만 기재)",
         "기재요령: 영재·발명교육 수료 사항은 '영재·발명교육 기록사항'에만 기재(기관명 불가)",
         "gifted_edu",
+    ),
+    # 부모 직업명 + 호칭이 조사 없이 붙은 꼴('의사 어머니', '변호사 삼촌').
+    # '대표·사장·임원'은 '학생 대표 어머니회'처럼 직업이 아닌 쓰임이 있어 뺀다.
+    (
+        r"(?<![가-힣])(?:한의사|치과의사|수의사|의사|약사|간호사|변호사|판사|검사|법조인|회계사|세무사|"
+        r"변리사|교수|기자|경찰관|소방관|군인|장교|공무원|외교관|목사|사업가|기업가|국회의원|조종사|"
+        r"파일럿|은행원|연구원|엔지니어|건축가|과학자)\s" + _PARENT + r"(?=$|[\s,.]|의|께|가|는|를|와|에게|이)",
+        "부모(친인척) 직업명 의심 (사회·경제적 지위 암시)",
+        f"기재요령: 부모(친인척 포함)의 직종·직업·직장·직위명 등 사회·경제적 지위 암시 기재 불가 {_B_COMMON}",
+        "parent_status",
     ),
 ]
 _BASE_PATTERNS = frozenset(p for p, *_ in RULE_PATTERNS)
@@ -560,8 +572,173 @@ def _thesis_record_findings(text: str) -> list[tuple[str, str, str, str]]:
 _CONTEXT_RULES = (_thesis_record_findings,)
 
 
-def rule_based_filter(text: str, custom_words: list[str] | None = None) -> list[dict]:
-    """정규표현식 + 문맥 결합 규칙 + 사용자 정의 금칙어로 명백한 금지 패턴을 우선 검출한다."""
+# ──────────────────────────────────────────────
+# 교사 판단(확인 필요) 힌트 패턴
+# 규정이 판단을 학교·교사에게 맡기거나 문장만으로는 위반 여부를 가를 수 없는 표현.
+# 자동으로 '기재 불가'를 정하지 않고, 이유를 붙여 '확인 필요'로 넘긴다.
+# 결과 dict에 level="hint", severity="주의", judgment=<교사에게 넘기는 이유>가 붙는다.
+# 정밀도 우선: 어휘군·문형으로만 쓰고, 위반 패턴과 겹치는 범위는 위반 쪽을 남긴다.
+# ──────────────────────────────────────────────
+HINT_LEVEL = "hint"
+_HINT_BASIS = "기재요령에 명문 판단 없음 — 학교·교사 확인 사항"
+
+HINT_PATTERNS = [
+    # 대회 암시: 전국 규모 무대·선발형 행사·학교 대표·공모형 행사·학술 발표회
+    (
+        r"(?:전국|광역|시도|교외)\s*(?:규모|단위)의?\s*[가-힣]{0,6}?\s*"
+        r"(?:무대|대항전|리그|행사|캠프|발표회|토론회|축전|페스티벌)"
+        r"|(?:청소년|학생)\s*(?:학술|연구|탐구)\s*(?:발표회|학술제|포럼)"
+        r"|[가-힣]{0,8}(?:캠프|행사|아카데미|프로그램)에\s*선발(?:되|돼|됨)"
+        r"|(?<![가-힣])(?:학교|교내|지역|시|도)\s*대표\s*(?:로\s*(?:출전|참가|선발|나가)|선수|팀으로)"
+        r"|(?:정책|아이디어|작품)\s*(?:제안\s*)?(?:공모|행사)",
+        "대회 참여 암시 표현",
+        "hint_competition",
+        "대회(경연·선발형 행사) 여부 학교 확인 필요 — 대회면 기재 불가, 수업 연계 활동이면 표현 수정",
+    ),
+    # 방과후·정규 교육과정 외 강좌 암시
+    (
+        r"정규\s*(?:수업|교육\s*과정|교과\s*시간)\s*(?:이후|후|뒤|외|이외|밖)"
+        r"|(?:방과|하교|일과)\s*(?:후|이후|뒤)(?:에)?\s*[가-힣\s]{0,12}?(?:강좌|특강|심화반|보충반|프로그램)"
+        r"|(?:심화|특성화|야간|주말|방학\s*중?)\s*(?:강좌|특강)"
+        r"|(?:야간|주말)\s*(?:교실|학교)",
+        "방과후·정규 교육과정 외 강좌 암시 표현",
+        "hint_afterschool",
+        "방과후학교·정규 교육과정 외 강좌 여부 학교 확인 필요 — 방과후학교면 세특 입력 불가",
+    ),
+    # 교외·수업 외 활동 암시(영역 적합성): 학교 밖·교외 기관, 외부 주관 강좌, 온라인 강좌 수강, 축제
+    (
+        r"(?<![가-힣])학교\s*밖(?!으로|\s*청소년)"
+        r"|(?<![가-힣])교외\s*(?:활동|기관|프로그램|행사|체험|캠프|교육|강좌|봉사)"
+        r"|외부\s*(?:기관|단체)\s*(?:주최|주관|운영)?\s*(?:프로그램|행사|캠프|강좌)"
+        r"|(?:대학|기관|단체|재단)\s*(?:주최|주관|개설|운영|연계)의?\s*[가-힣\s]{0,8}?(?:강좌|캠프|프로그램|강의|행사|체험)"
+        r"|(?:온라인|인터넷|원격)\s*(?:공개\s*)?(?:강좌|강의)(?:를|을)?\s*(?:수강|듣|들으|들은|이수|청강)"
+        r"|(?:학교|교내)\s*축제|축제\s*(?:부스|기간|무대)"
+        r"|청소년\s*(?:수련관|수련원|문화의\s*집)",
+        "교외·수업 외 활동 암시 표현",
+        "hint_outside",
+        "교외 활동·수업 외 활동 여부 학교 확인 필요 — 세특은 수업 중 관찰 내용 중심(영역 적합성)",
+    ),
+    # 가정의 사회·경제적 지위 암시(직종·직장 우회, 가구 형태)
+    (
+        r"(?<![가-힣])(?:맞벌이|외벌이|한부모|조손|기초\s*생활\s*수급|차상위|저소득)\s*(?:가정|가구|계층|가족)?"
+        r"|(?:운영|경영|근무|종사|재직)(?:하시|하)는\s*(?:[가-힣]{1,4}\s)?" + _PARENT
+        # 맨 '부모'(님 없음)는 '부모의 직업 분포'처럼 일반 주제어로 쓰여 학생 본인 가정을 가리키는 호칭만 본다
+        + r"|(?:부모님|아버지|어머니|아빠|엄마|부친|모친)(?:의|께서|가|는|은)?\s*(?:직업|직장|일터|근무지|사업장|업무)"
+        r"|(?<![가-힣])(?:법조인|의료인|금융인|언론인|정치인|기업인|경영인)\s*(?:가정|집안|가족)",
+        "가정의 사회·경제적 지위 암시 표현",
+        "hint_parent",
+        "부모·가정의 직종·사회경제적 지위 암시 여부 학교 확인 필요",
+    ),
+    # 자격·인증시험 합격 암시
+    (
+        r"(?:시험|검정)(?:에서|에)?\s*(?:최종\s*)?합격|최종\s*합격"
+        r"|(?:자격|인증|면허|급수)\s*(?:취득\s*)?(?:과정|준비|대비)"
+        r"|(?:능력|역량)\s*인증\s*(?:과정|프로그램|시험)",
+        "자격·인증시험 합격/취득 암시 표현",
+        "hint_certification",
+        "자격 취득·인증시험 참여 여부 학교 확인 필요 — 해당되면 자격증 취득상황 외 기재 불가",
+    ),
+    # 사교육 언급
+    (
+        r"(?<![대입])학원(?!\s*(?:폭력|물))|교습소|과외\s*(?:수업|교습|선생)|(?<![가-힣])사교육(?!\s*(?:비|정책|문제|경감|시장))",
+        "사교육 언급",
+        "hint_private_edu",
+        "사교육 언급 — 명문 금지는 없으나 교사 관찰 근거·사교육 유발 우려 학교 판단 필요",
+    ),
+    # 특정 상호(서비스) 우회 묘사
+    (
+        r"(?:세계|국내|국내외)\s*(?:최대|최고|1위)의?\s*[가-힣\s]{0,10}?"
+        r"(?:플랫폼|포털|검색\s*엔진|메신저|사이트|동영상\s*서비스|온라인\s*서비스|앱|어플)",
+        "특정 상호(서비스) 우회 묘사",
+        "hint_brand",
+        "상호명은 없지만 특정 서비스가 사실상 특정되는지 교사 확인 필요",
+    ),
+    # 생성형 AI 활용 서술
+    (
+        r"(?:생성형|대화형)\s*(?:AI|인공지능)\s*(?:서비스|도구|프로그램|챗봇)?(?:에|에게|을|를|로|으로)?\s*"
+        r"(?:[가-힣]{1,4}\s)?(?:질문|활용|이용|사용|입력|물어|대화)"
+        r"|(?:AI|인공지능)\s*챗봇(?:에|에게|을|를)?\s*(?:질문|활용|이용|사용|입력|물어)",
+        "생성형 AI 활용 서술",
+        "hint_genai",
+        "학생의 생성형 AI 활용 서술 — 학생 실제 수행·교사 관찰 근거 확인 필요",
+    ),
+]
+HINT_RULE_IDS = frozenset(r for _p, _r, r, _j in HINT_PATTERNS)
+# 힌트 → 관련 기재금지 범주(few-shot 예시 선택 가산용)
+HINT_TO_CATEGORY = {
+    "hint_competition": "competition",
+    "hint_afterschool": "mooc_afterschool",
+    "hint_outside": "mooc_afterschool",
+    "hint_parent": "parent_status",
+    "hint_certification": "certification_test",
+    "hint_private_edu": "institution",
+    "hint_brand": "brand",
+}
+
+# 부모 호칭이 있는 문장에서 '○○계'(직종 분야) 어휘 — 문맥 결합 힌트
+_FIELD_WORD_RE = re.compile(
+    r"(?<![가-힣])(?:법조|의료|금융|언론|정|재|학|교육|문화|예술|연예|체육|종교|방송|산업|공직)계"
+)
+_PARENT_RE = re.compile(_PARENT)
+
+
+def _parent_field_hints(text: str) -> list[tuple[int, int, str]]:
+    out = []
+    for sm in _SENT_RE.finditer(text):
+        sent = sm.group()
+        if not _PARENT_RE.search(sent):
+            continue
+        for m in _FIELD_WORD_RE.finditer(sent):
+            out.append((sm.start() + m.start(), sm.start() + m.end(), "hint_parent"))
+    return out
+
+
+def _hint_findings(text: str, taken: list[tuple[int, int]]) -> list[dict]:
+    """힌트 패턴 검출. 위반 검출 범위(taken)와 겹치면 건너뛴다."""
+    judgments = {rid: (reason, judgment) for _p, reason, rid, judgment in HINT_PATTERNS}
+    hits: list[tuple[int, int, str]] = []
+    for pattern, _reason, rid, _j in HINT_PATTERNS:
+        for m in re.finditer(pattern, text):
+            if m.group().strip():
+                hits.append((m.start(), m.end(), rid))
+    hits.extend(_parent_field_hints(text))
+    hits.sort()
+    out = []
+    spans = list(taken)
+    for s, e, rid in hits:
+        if any(s < te and ts < e for ts, te in spans):
+            continue
+        spans.append((s, e))
+        reason, judgment = judgments[rid]
+        out.append(
+            {
+                "word": text[s:e].strip(),
+                "reason": f"{reason} — 교사 판단 필요",
+                "basis": _HINT_BASIS,
+                "rule_id": rid,
+                "level": HINT_LEVEL,
+                "severity": "주의",
+                "judgment": judgment,
+                "suggestion_1": "수업 중 관찰한 학습 과정 중심으로 다시 서술",
+                "suggestion_2": "해당 활동이 기재 가능한 활동인지 학교 기준 확인 후 유지·삭제",
+            }
+        )
+    return out
+
+
+def is_hint(finding: dict) -> bool:
+    """교사 판단(확인 필요) 힌트 검출이면 True."""
+    return finding.get("level") == HINT_LEVEL or finding.get("rule_id") in HINT_RULE_IDS
+
+
+def rule_based_filter(
+    text: str, custom_words: list[str] | None = None, include_hints: bool = True
+) -> list[dict]:
+    """정규표현식 + 문맥 결합 규칙 + 사용자 정의 금칙어로 명백한 금지 패턴을 우선 검출한다.
+
+    include_hints=True면 교사 판단 힌트(level='hint', severity='주의')도 함께 돌려준다.
+    수정본·초안 재검사처럼 '금지 패턴 잔존' 여부만 볼 때는 False로 부른다.
+    """
     findings = []
     seen = set()
     text = text or ""
@@ -596,6 +773,9 @@ def rule_based_filter(text: str, custom_words: list[str] | None = None) -> list[
     for rule in _CONTEXT_RULES:
         for word, reason, basis, rule_id in rule(text):
             add(word, reason, basis, rule_id)
+            pos = text.find(word)
+            if pos >= 0:
+                spans.append((pos, pos + len(word)))
     for word in custom_words or []:
         word = word.strip()
         if word and word not in seen and word in text:
@@ -610,6 +790,13 @@ def rule_based_filter(text: str, custom_words: list[str] | None = None) -> list[
                     "suggestion_2": "맥락에 맞는 중립적 표현으로 대체",
                 }
             )
+            pos = text.find(word)
+            spans.append((pos, pos + len(word)))
+    if include_hints:
+        for h in _hint_findings(text, spans):
+            if h["word"] and h["word"] not in seen:
+                seen.add(h["word"])
+                findings.append(h)
     return findings
 
 
@@ -1118,17 +1305,24 @@ def _check_format(text: str) -> _Group:
         "중복 문장부호",
     )
 
-    # 문장 끝 마침표 누락: 다른 문장이 마침표로 끝나는 글에서, 줄 끝이 명사형 종결
-    # (받침 ㅁ·ㄻ — '~함', '~임', '~만듦')이나 '~다'인데 부호가 없을 때만 본다.
-    # 줄바꿈된 문장 중간('연계하여')이나 마침표를 전혀 쓰지 않는 한 줄 메모는 잡지 않는다.
-    if _SENTENCE_PERIOD_RE.search(text):
-        hits = []
+    # 문장 끝 마침표 누락: 줄 끝이 명사형 종결(받침 ㅁ·ㄻ — '~함', '~임', '~만듦')이나
+    # '~다'인데 부호가 없을 때 본다. 마침표 의무 명문 규정은 없어 '추정' 권고로 둔다.
+    # - 다른 문장이 마침표로 끝나는 글: 모든 줄 끝을 본다.
+    # - 마침표를 전혀 쓰지 않은 글: 어절 3개 이상인 명사형 종결 문장만 본다
+    #   (짧은 메모·단어 나열은 제외). 줄바꿈된 문장 중간('연계하여')은 종성이 달라 제외.
+    has_period = bool(_SENTENCE_PERIOD_RE.search(text))
+    hits = []
+    if text.strip():
         pos = 0
         for line in text.split("\n"):
             stripped = line.rstrip()
             if stripped:
                 last = stripped[-1]
-                if _jong(last) in (_JONG_M, _JONG_LM) or last == "다":
+                noun_end = _jong(last) in (_JONG_M, _JONG_LM)
+                if not has_period and (not noun_end or len(stripped.split()) < 3):
+                    pos += len(line) + 1
+                    continue
+                if noun_end or last == "다":
                     end = pos + len(stripped)
                     start = end - 1
                     issues.append(
@@ -1138,7 +1332,7 @@ def _check_format(text: str) -> _Group:
                             start,
                             end,
                             last,
-                            "문장 끝 마침표 누락",
+                            "문장 끝 마침표 누락 — 추정(명문 규정 없음)",
                             f"「{last}」 뒤에 마침표(.) 추가",
                         )
                     )
@@ -1146,10 +1340,83 @@ def _check_format(text: str) -> _Group:
             pos += len(line) + 1
         if hits:
             warnings.append(
-                f"서식 점검 — 문장 끝 마침표 누락 {len(hits)}곳: " + _sample(hits)
+                f"서식 점검 — 문장 끝 마침표 누락 {len(hits)}곳(추정·명문 규정 없음, 권고): "
+                + _sample(hits)
             )
 
     return issues, warnings
+
+
+# ── 8-1) 띄어쓰기 로컬 규칙: 조사 띄어 씀, 열거 '등' 붙여 씀, '잘 안되-' ──
+# 한글 맞춤법 제41항: 조사는 앞말에 붙여 씀. 홀로 낱말이 될 수 없는 조사만 '확실'로 본다.
+# '이·가·과·도·만·은·의'처럼 관형사·명사(이 방법, 과, 도, 만 명, 은)와 겹치는 조사는
+# 복수 접미사 '들' 뒤에서만 확실로 보고, 그 밖의 자리는 '확인 필요'로 넘긴다.
+# '마저'는 부사('남은 일을 마저 함')와 겹쳐 뺀다.
+_PARTICLE_SURE = r"(?:에서|에게|께서|으로|까지|부터|조차|을|를|는|에|로|와)"
+_PARTICLE_AMBIG = r"(?:과|와|은|의|도|만|이|가)"
+_PARTICLE_END = r"(?=[ \t]|[.,!?]|$)"
+_PARTICLE_SURE_RE = re.compile(r"([가-힣]+)([ \t]+)(" + _PARTICLE_SURE + r")" + _PARTICLE_END)
+_PARTICLE_PLURAL_RE = re.compile(r"([가-힣]+들)([ \t]+)(" + _PARTICLE_AMBIG + r")" + _PARTICLE_END)
+_PARTICLE_AMBIG_RE = re.compile(r"([가-힣]{2,})([ \t]+)((?:과|은|의))" + _PARTICLE_END)
+# 관형형 어미(배운·된·할 …)·부사 뒤의 '이/과/은/의'는 조사가 아닐 가능성이 커 제외
+_ADNOMINAL_LAST = frozenset("운된한할될던는은을인일른랜")
+# 한글 맞춤법 제45항: 열거 '등'은 띄어 씀. '등'으로 끝나는 한 낱말은 제외.
+_DEUNG_RE = re.compile(r"([가-힣]{2,})등(?=[ \t,.]|$|의|을|를|이|은|에|과|와|으로|도|에서)")
+_DEUNG_WORDS = (
+    "동등 평등 불평등 균등 대등 차등 초등 중등 고등 열등 우등 상등 하등 일등 이등 삼등 꼴등 등등 갈등 "
+    "가로등 신호등 전등 형광등 조명등 경고등 비상등 연등 석등 점등 소등 백열등 유도등 표시등 정지등 "
+    "급등 폭등 반등 앙등 비등 발등 손등 콧등 칼등 산등 등등"
+).split()
+_AN_DOEDA_RE = re.compile(r"잘[ \t]?안되(?=[어었서고지는니며면])")
+
+
+def _check_spacing(text: str) -> _Group:
+    issues: list[dict] = []
+    ambiguous = 0
+
+    def add(m, fixed, problem, basis, judgment=""):
+        nonlocal ambiguous
+        issues.append(
+            _issue("spacing", "맞춤법", m.start(), m.end(), m.group(), problem, fixed)
+        )
+        issues[-1]["basis"] = basis
+        if judgment:
+            issues[-1]["judgment"] = judgment
+            ambiguous += 1
+
+    taken: list[tuple[int, int]] = []
+    for rx in (_PARTICLE_SURE_RE, _PARTICLE_PLURAL_RE):
+        for m in rx.finditer(text):
+            word, _sp, particle = m.groups()
+            if any(m.start() < e and s < m.end() for s, e in taken):
+                continue
+            taken.append(m.span())
+            add(m, word + particle, f"띄어쓰기: 조사 「{particle}」는 앞말에 붙여 씀",
+                "한글 맞춤법 제41항(조사는 앞말에 붙여 씀)")
+    for m in _PARTICLE_AMBIG_RE.finditer(text):
+        word, _sp, particle = m.groups()
+        if word[-1] in _ADNOMINAL_LAST or any(m.start() < e and s < m.end() for s, e in taken):
+            continue
+        taken.append(m.span())
+        add(m, word + particle, f"띄어쓰기 확인: 「{particle}」가 조사라면 앞말에 붙여 씀",
+            "한글 맞춤법 제41항(조사는 앞말에 붙여 씀)",
+            judgment="조사인지 독립 낱말인지 문맥 확인 필요")
+    for m in _DEUNG_RE.finditer(text):
+        word = m.group(1)
+        if any((word + "등").endswith(w) for w in _DEUNG_WORDS):
+            continue
+        add(m, f"{word} 등", "띄어쓰기: 열거의 「등」은 앞말과 띄어 씀",
+            "한글 맞춤법 제45항(열거하는 말 '등'은 띄어 씀)")
+    for m in _AN_DOEDA_RE.finditer(text):
+        add(m, "잘 안 되", "띄어쓰기 확인: 부정의 뜻이면 「잘 안 되-」로 띄어 씀",
+            "한글 맞춤법 제2항(단어별 띄어쓰기) — '안되다'(섭섭하다)와 구별",
+            judgment="부정 부사 '안'인지 '안되다'(섭섭하다)인지 문맥 확인 필요")
+    if not issues:
+        return [], []
+    issues.sort(key=lambda i: i["start"])
+    sample = ", ".join(f"「{i['word']}」→「{i['suggestion']}」" for i in issues[:5])
+    note = f" (그중 {ambiguous}건은 문맥 확인 필요)" if ambiguous else ""
+    return issues, [f"띄어쓰기 점검(로컬 규칙) {len(issues)}건{note} — {sample}"]
 
 
 # ── 9) 맞춤법 로컬 규칙 (정밀도 우선, 근거가 분명한 흔한 오류만) ──
@@ -1258,6 +1525,7 @@ _STYLE_CHECKS = (
     _check_english_usage_issues,
     _check_exaggeration,
     _check_format,
+    _check_spacing,
     _check_spelling,
 )
 

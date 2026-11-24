@@ -145,9 +145,16 @@ def test_missing_final_period_flagged_when_other_sentences_have_period():
     assert _has(ws, "문장 끝 마침표 누락")
 
 
-def test_missing_final_period_not_flagged_without_any_period():
-    # 마침표를 전혀 쓰지 않은 한 줄 메모·짧은 예시는 잡지 않는다.
-    assert style_check("데이터를 수집하여 그래프로 표현하고 원인을 고찰함") == []
+def test_missing_final_period_flagged_without_any_period_as_inferred():
+    # 마침표를 전혀 쓰지 않은 글이라도 어절 3개 이상의 명사형 종결 문장은 '추정' 권고로 잡는다.
+    ws = style_check("데이터를 수집하여 그래프로 표현하고 원인을 고찰함")
+    assert _has(ws, "문장 끝 마침표 누락") and _has(ws, "추정")
+
+
+def test_missing_final_period_not_flagged_for_short_memo():
+    # 짧은 메모(어절 3개 미만)·'~다'가 아닌 비명사형 끝은 마침표가 없어도 잡지 않는다.
+    assert not _has(style_check("원인 고찰함"), "문장 끝 마침표 누락")
+    assert not _has(style_check("데이터를 수집하여 그래프로 표현하고"), "문장 끝 마침표 누락")
 
 
 def test_missing_final_period_not_flagged_for_wrapped_line():

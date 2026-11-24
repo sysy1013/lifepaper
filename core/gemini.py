@@ -10,7 +10,7 @@ from google import genai
 from google.genai import types as genai_types
 
 from core.masking import apply_mask, remove_mask
-from core.rules import rule_based_filter
+from core.rules import HINT_TO_CATEGORY, rule_based_filter
 from core.security import sanitize_exception
 
 MODEL_CHOICES = {
@@ -211,6 +211,33 @@ SYSTEM_PROMPT = """너는 교육부 '학교생활기록부 기재요령'을 완�
 - 대회 명칭을 "행사", "프로그램", "활동" 등으로 바꿔 쓴 편법 기재도 실질적으로 대회 참여·수상을
   드러내면 위반으로 탐지하라.
 - 공인어학시험·인증시험 성적, 모의고사 성적, 각종 점수·등급·석차도 기재 금지 대상이다.
+- 문장만으로 위반 여부를 가를 수 없고 학교·교사가 사실관계를 확인해야 하는 경우(대회인지 수업
+  활동인지, 방과후학교인지 정규 수업인지, 교외 활동인지 등)는 "주의"로 두고 reason에 무엇을
+  확인해야 하는지 적는다. 명백한 위반만 "위반"으로 둔다.
+
+[우회·변형 표현 판단 지침 — 키워드가 없어도 내용으로 판단]
+- 특허: '특허 출원', '특허를 출원함', '특허 등록을 마침'처럼 띄어 쓰거나 조사를 넣어도 출원·등록 사실이면 위반.
+- 부모 직업: '의사 어머니', '변호사 삼촌'처럼 조사 없이 붙은 직업명, '법조계에 계신 아버지',
+  '가게를 경영하시는 아버지'처럼 분야·직장으로 돌려 말한 것도 직종·지위 암시로 위반.
+  '부모의 직업 분포 통계'처럼 일반 주제로 다룬 것은 위반 아님.
+- 대회 우회: '본선 진출', '예선 통과', '결선 무대', '우수 팀 선정', '전국 규모 토론 무대'는 대회 참여를
+  드러내면 위반, 대회인지 불분명하면 "주의". 교내대회 '준비 과정'만 적어도 대회 참여 사실이 드러나면 위반.
+- 자격 취득: 자격증 이름 없이 '국가기술자격 취득 과정', '필기 합격 후 실기 응시'처럼 취득·합격을 서술해도 위반.
+  인증시험 성격이 불분명하면 "주의".
+- 대학명: 'OO의대', 'OO과기대', 'OO대 교수', 이니셜 'A대'처럼 줄이거나 합성한 대학명도 위반.
+  '희망 대학', '지역 대학'처럼 특정하지 않는 일반어는 위반 아님.
+- 소논문 실적: '소논문' 단어가 없어도 연구 제목(주제)과 참여 인원·기간을 함께 적으면 위반.
+- 축제명: 따옴표로 묶은 고유 축제·행사명('OO제', 'OO 한마당')은 학교 식별 정보로 위반.
+  이름 없는 '학교 축제'는 위반 아님이나 수업 외 활동이라 "주의".
+- 교외상: '구청장 표창', '시장 명의 상장', '공로패'처럼 교외 기관장·단체가 준 상은 위반.
+- 인증시험: '한자 급수 시험', 'N급 합격', '검정 시험'처럼 급수·검정 시험 참여·합격은 위반.
+- 장학: '장학 혜택', '등록금 감면 혜택을 받음'처럼 장학 수혜를 돌려 말해도 위반. 수업 주제로서 장학 제도 토론은 아님.
+- 출간: '집필한 책이 서점에 유통됨', '출판되어 판매됨'는 도서 출간 사실로 위반.
+  수업 시간에 함께 만든 학급 문집·학급 신문·모둠 책은 출간 실적이 아니므로 위반 아님.
+- 해외: '해외 교육 나눔', '현지 봉사', '홈스테이'처럼 단어를 바꾼 해외 활동도 위반.
+- 기관명: '바다숲해양연구소'처럼 지명·분야를 붙여 합성한 고유 기관명도 위반(교육관련기관은 예외).
+- 강사명: '초빙 강사 OOO 박사님', 'OOO 교수님'처럼 실명이 드러나면 위반. 성명 없는 '외부 강사'는 위반 아님.
+- 도서명(『』《》<>〈〉) 안의 상호·대학·기관명은 독서 기록으로 허용 — 위반으로 내지 않는다.
 
 [출력 규칙 - 반드시 준수]
 - 결과는 반드시 JSON 배열(List of Dicts)로만 반환한다. 다른 설명 문장을 절대 붙이지 않는다.
@@ -253,7 +280,9 @@ def build_analyze_prompts(text: str, major: str, use_fewshot: bool = True) -> tu
         return SYSTEM_PROMPT, user_prompt
     from core.fewshot import format_fewshot_block, rulebook_excerpt, select_fewshots
 
-    hints = {f.get("rule_id") for f in rule_based_filter(text)}
+    hints = {
+        HINT_TO_CATEGORY.get(f.get("rule_id"), f.get("rule_id")) for f in rule_based_filter(text)
+    }
     shots = select_fewshots(text, k=FEWSHOT_K, hint_categories=hints)
     user_prompt = (
         f"{rulebook_excerpt()}\n\n{format_fewshot_block(shots)}\n\n{user_prompt}"
@@ -308,8 +337,26 @@ def analyze_with_gemini(
             }
             if use_fewshot:
                 _validate_cited_rule(entry, item)
+            if _only_in_book_titles(text, entry):
+                continue
             results.append(entry)
     return results
+
+
+_BOOK_TITLE_RULES = ("brand", "university_name", "institution")
+
+
+def _only_in_book_titles(text: str, entry: dict) -> bool:
+    """상호·대학·기관명 지적이 원문의 도서명 표기(『』《》<>〈〉) 안에서만 나오면 True (허용 예외)."""
+    from core.rulebook import inside_book_title, rule_id_for_finding
+
+    if rule_id_for_finding(entry) not in _BOOK_TITLE_RULES:
+        return False
+    word = entry.get("word", "")
+    positions = [m.start() for m in re.finditer(re.escape(word), text or "")] if word else []
+    return bool(positions) and all(
+        inside_book_title(text, p, p + len(word)) for p in positions
+    )
 
 
 def review_text(text: str, major: str, api_key: str, custom_words: list[str]) -> list[dict]:
@@ -406,7 +453,8 @@ def rewrite_with_gemini(
     )
     result = _gemini_text(model, prompt)
 
-    remaining = rule_based_filter(result, [])
+    # 교사 판단 힌트(확인 필요)는 '남은 금지 표현'이 아니므로 재요청 대상에서 뺀다.
+    remaining = rule_based_filter(result, [], include_hints=False)
     if remaining:
         words = ", ".join(f"「{f['word']}」" for f in remaining)
         retry_prompt = (
