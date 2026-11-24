@@ -26,7 +26,7 @@ def test_rules_basis_label():
 def test_rule_patterns_have_rule_id_and_page_basis():
     for pattern, reason, basis, rule_id in RULE_PATTERNS:
         assert rule_id
-        if rule_id != "youth_org":  # 쪽수 미확인 → 조항명만
+        if rule_id not in ("youth_org", "gifted_edu"):  # 쪽수 미확인 → 조항명만
             assert "p.18-19" in basis or "p.118·149" in basis, basis
 
 

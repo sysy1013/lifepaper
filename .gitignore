@@ -1,7 +1,21 @@
 # ── 비밀키/환경변수 (절대 커밋 금지) ──
 .streamlit/secrets.toml
+secrets*.toml
+**/secrets*.toml
 .env
+.env*
 *.env
+*.key
+*.pem
+*credentials*.json
+service-account*.json
+
+# ── 평가·작업 산출물 (학생 본문·결과가 담길 수 있음) ──
+scratch/
+scratchpad/
+*.scratch.*
+result*.json
+eval_out*/
 
 # ── Python ──
 __pycache__/

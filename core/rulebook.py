@@ -142,6 +142,18 @@ RULEBOOK: dict[str, dict] = {
         "exceptions": THESIS_EXCEPTION,
         "source": GUIDE_SETEUK,
     },
+    "thesis_record": {
+        "title": "연구보고서(소논문) 실적",
+        "summary": "소논문 실적(제목·연구주제·참여인원·소요시간) 기재 불가 — 허용 6과목도 실적은 제외",
+        "exceptions": "허용 6과목은 실적을 뺀 특기사항(과정·역량)만 서술 가능",
+        "source": GUIDE_SETEUK,
+    },
+    "gifted_edu": {
+        "title": "영재·발명교육",
+        "summary": "영재·발명교육 수료 사항은 '영재·발명교육 기록사항'에만 기재(기관명 불가)",
+        "exceptions": "",
+        "source": f"{GUIDE} 영재·발명교육 기록사항",
+    },
     "youth_org": {
         "title": "청소년단체 활동",
         "summary": "정규교육과정 이외의 청소년단체 활동은 단체명 기재 불가",
@@ -352,6 +364,27 @@ def is_thesis_subject(subject: str) -> bool:
     return any(norm == re.sub(r"\s+", "", s) for s in THESIS_SUBJECTS)
 
 
+PAPS_EXCEPTION = "체육 관련 교과 세특에는 PAPS 등급 입력 가능"
+_PAPS_RE = re.compile(r"PAPS|팝스|학생건강체력평가", re.IGNORECASE)
+_PE_SUBJECT_RE = re.compile(r"체육|스포츠|운동")
+
+
+def is_paps_grade(word: str, text: str, start: int) -> bool:
+    """검출어가 등급 표기이고 바로 앞(30자 이내)이나 검출어 안에 PAPS 언급이 있으면 True."""
+    if "등급" not in (word or ""):
+        return False
+    if _PAPS_RE.search(word):
+        return True
+    if start is None or start < 0:
+        return bool(_PAPS_RE.search(text or ""))
+    return bool(_PAPS_RE.search((text or "")[max(0, start - 30) : start]))
+
+
+def is_pe_subject(subject: str) -> bool:
+    """체육 관련 교과(체육·스포츠·운동 포함 과목명)이면 True."""
+    return bool(_PE_SUBJECT_RE.search(subject or ""))
+
+
 def apply_exceptions(
     rule_id: str, verdict: str, word: str, text: str, start: int, end: int, subject: str
 ) -> tuple[str, str, bool]:
@@ -371,4 +404,9 @@ def apply_exceptions(
         return verdict, BOOK_TITLE_EXCEPTION, True
     if rule_id == "thesis" and is_thesis_subject(subject):
         return "확인 필요", THESIS_EXCEPTION, False
+    if rule_id == "score" and is_paps_grade(word, text, start):
+        if is_pe_subject(subject):
+            return verdict, PAPS_EXCEPTION, True
+        # 과목을 모르면 확정하지 않고 확인 필요로 낮춘다 (체육 관련 교과만 허용)
+        return "확인 필요", PAPS_EXCEPTION, False
     return verdict, exception, False

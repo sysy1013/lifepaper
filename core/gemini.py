@@ -11,6 +11,7 @@ from google.genai import types as genai_types
 
 from core.masking import apply_mask, remove_mask
 from core.rules import rule_based_filter
+from core.security import sanitize_exception
 
 MODEL_CHOICES = {
     "균형 (3.0 Flash — 권장)": "gemini-3-flash-preview",
@@ -157,9 +158,10 @@ def _gemini_text(model, prompt: str, max_attempts: int = 3) -> str:
                                 return text
                         except Exception:
                             pass
-                raise
+                # 원본 예외 유형은 유지하고 메시지의 키·토큰만 가린다
+                raise sanitize_exception(e)
             if not (empty or _is_retryable_error(e)):
-                raise
+                raise sanitize_exception(e)
             time.sleep(2 * (2**attempt) + random.random())
     raise last_error  # pragma: no cover — 위에서 항상 raise됨
 
@@ -228,16 +230,65 @@ SYSTEM_PROMPT = """너는 교육부 '학교생활기록부 기재요령'을 완�
 """
 
 
-def analyze_with_gemini(text: str, major: str, api_key: str) -> list[dict]:
-    """전체 텍스트와 희망 진로를 Gemini에 전달하여 위반 표현 목록(JSON)을 받아온다."""
-    model = _make_model(
-        api_key, SYSTEM_PROMPT, temperature=0.2, json_mode=True, thinking=False
-    )
+# few-shot·조항 발췌 사용 시 SYSTEM_PROMPT 뒤에 붙는 근거 인용 규칙 (판단 원칙은 그대로)
+CITED_RULE_APPENDIX = """
+[근거 인용 규칙 - 반드시 준수]
+- 각 항목에 7번째 키 "cited_rule"을 추가한다: 사용자 메시지의 [기재요령 조항 발췌]에 있는
+  rule_id 중 하나를 그대로 적는다(예: "parent_status"). 발췌에 없는 조항·쪽수를 지어내지 않는다.
+- 근거 조항을 고를 수 없을 만큼 애매하면 "severity"를 "주의"로 둔다.
+- [판단 참고 예시]는 판단 기준만 참고하고, 예시 문장의 표현을 결과에 넣지 않는다.
+"""
+FEWSHOT_K = 6
+UNVERIFIED_NOTE = "근거 미확인"
 
+
+def build_analyze_prompts(text: str, major: str, use_fewshot: bool = True) -> tuple[str, str]:
+    """(system_prompt, user_prompt) 조립 (순수 함수). use_fewshot=False면 기존과 동일."""
     user_prompt = (
         f"[학생의 희망 진로/학과]\n{major if major.strip() else '미입력'}\n\n"
         f"[심사 대상 생기부 텍스트]\n{text}\n\n"
         "위 텍스트를 심사하여 JSON 배열로만 답하라."
+    )
+    if not use_fewshot:
+        return SYSTEM_PROMPT, user_prompt
+    from core.fewshot import format_fewshot_block, rulebook_excerpt, select_fewshots
+
+    hints = {f.get("rule_id") for f in rule_based_filter(text)}
+    shots = select_fewshots(text, k=FEWSHOT_K, hint_categories=hints)
+    user_prompt = (
+        f"{rulebook_excerpt()}\n\n{format_fewshot_block(shots)}\n\n{user_prompt}"
+    )
+    return SYSTEM_PROMPT + CITED_RULE_APPENDIX, user_prompt
+
+
+def _validate_cited_rule(entry: dict, item: dict) -> None:
+    """cited_rule이 rulebook에 있는지 확인. 없거나 형식 불량이면 '주의'로 낮추고 note 표기."""
+    from core.fewshot import resolve_cited_rule
+
+    raw = item.get("cited_rule")
+    rid, status = resolve_cited_rule(raw)
+    entry["cited_rule"] = raw.strip() if isinstance(raw, str) else ""
+    entry["cited_rule_status"] = status
+    if rid:
+        entry["rule_id"] = rid
+        entry["note"] = ""
+    else:
+        entry["severity"] = "주의"
+        entry["note"] = UNVERIFIED_NOTE
+
+
+def analyze_with_gemini(
+    text: str, major: str, api_key: str, use_fewshot: bool = True
+) -> list[dict]:
+    """전체 텍스트와 희망 진로를 Gemini에 전달하여 위반 표현 목록(JSON)을 받아온다.
+
+    use_fewshot=True(기본): few-shot 예시와 기재요령 조항 발췌를 주입하고, 응답의
+    cited_rule이 rulebook에 실제로 있는지 검증한다(키 추가만, 기존 키 유지).
+    use_fewshot=False: 기존 프롬프트·반환 형식 그대로.
+    """
+    system_prompt, user_prompt = build_analyze_prompts(text, major, use_fewshot)
+    model = _make_model(
+        api_key, system_prompt, temperature=0.2, json_mode=True, thinking=False
     )
 
     parsed = _gemini_json(model, user_prompt)
@@ -247,16 +298,17 @@ def analyze_with_gemini(text: str, major: str, api_key: str) -> list[dict]:
     results = []
     for item in parsed:
         if isinstance(item, dict) and item.get("word"):
-            results.append(
-                {
-                    "word": str(item.get("word", "")).strip(),
-                    "reason": str(item.get("reason", "")).strip(),
-                    "basis": str(item.get("basis", "")).strip(),
-                    "severity": str(item.get("severity", "위반")).strip() or "위반",
-                    "suggestion_1": str(item.get("suggestion_1", "")).strip(),
-                    "suggestion_2": str(item.get("suggestion_2", "")).strip(),
-                }
-            )
+            entry = {
+                "word": str(item.get("word", "")).strip(),
+                "reason": str(item.get("reason", "")).strip(),
+                "basis": str(item.get("basis", "")).strip(),
+                "severity": str(item.get("severity", "위반")).strip() or "위반",
+                "suggestion_1": str(item.get("suggestion_1", "")).strip(),
+                "suggestion_2": str(item.get("suggestion_2", "")).strip(),
+            }
+            if use_fewshot:
+                _validate_cited_rule(entry, item)
+            results.append(entry)
     return results
 
 

@@ -84,6 +84,7 @@ from core.ocr import (
     validate_uploads,
 )
 from core.privacy import scan_identifying_risks
+from core.security import register_secret, safe_error
 from core.project import replace_in_entries
 from core.report import (
     REPORT_COLUMNS,
@@ -321,7 +322,7 @@ def run_batch_review_pipeline(
                 "name": stem,
                 "text": "",
                 "findings": [],
-                "error": str(e),
+                "error": safe_error(e),
                 "major": eff_major,
                 "row_major": row_major,
             }
@@ -462,11 +463,11 @@ def render_image_input(api_key: str) -> str:
                 st.session_state.pop("image_verify", None)
                 record_history("이미지 글자 읽기", transcript)
             except GeminiCreditError as e:
-                st.error(f"❌ {e}")
+                st.error(f"❌ {safe_error(e, with_type=False)}")
             except ValueError as e:
-                st.error(f"❌ {e}")
+                st.error(f"❌ {safe_error(e, with_type=False)}")
             except Exception as e:
-                st.error(f"❌ Gemini API 호출 실패: {e}")
+                st.error(f"❌ Gemini API 호출 실패: {safe_error(e)}")
 
     if "image_transcript" not in st.session_state:
         return ""
@@ -513,11 +514,11 @@ def render_image_input(api_key: str) -> str:
                     parts, transcript, api_key
                 )
         except GeminiCreditError as e:
-            st.error(f"❌ {e}")
+            st.error(f"❌ {safe_error(e, with_type=False)}")
         except ValueError as e:
-            st.error(f"❌ {e}")
+            st.error(f"❌ {safe_error(e, with_type=False)}")
         except Exception as e:
-            st.error(f"❌ Gemini API 호출 실패: {e}")
+            st.error(f"❌ Gemini API 호출 실패: {safe_error(e)}")
 
     diffs = st.session_state.get("image_verify")
     if diffs is not None:
@@ -659,7 +660,7 @@ def render_quality_block(
                         result, mask_map or []
                     )
                 except Exception as e:
-                    st.error(f"❌ 품질 진단 실패: {e}")
+                    st.error(f"❌ 품질 진단 실패: {safe_error(e)}")
     q = st.session_state.get(state_key)
     if q:
         render_quality_result(q)
@@ -697,7 +698,7 @@ def render_proofread_block(
                     # 위쪽 오류 리포트(줄·문장별)가 새 결과를 반영하도록 다시 그린다.
                     st.rerun()
                 except Exception as e:
-                    st.error(f"❌ 오탈자 검사 실패: {e}")
+                    st.error(f"❌ 오탈자 검사 실패: {safe_error(e)}")
 
     items = st.session_state.get(state_key)
     if items is None:
@@ -814,7 +815,7 @@ def render_length_adjuster(
                         st.session_state.pop(k, None)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"❌ 분량 조절 실패: {e}")
+                    st.error(f"❌ 분량 조절 실패: {safe_error(e)}")
 
     if by_bytes:
         st.caption(
@@ -899,7 +900,7 @@ def render_bulk_length_fit(
             )
             return remove_mask(adjusted, fit_map), ""
         except Exception as e:
-            return "", str(e)
+            return "", safe_error(e)
 
     outs = run_parallel(len(over), _fit_job, "분량 맞추는 중…")
     done = 0
@@ -1234,6 +1235,7 @@ def check_password() -> bool:
         correct = str(st.secrets.get("APP_PASSWORD", ""))
     except Exception:
         correct = ""
+    register_secret(correct)
     if not correct:
         return True
     if st.session_state.get("auth_ok"):
@@ -1273,6 +1275,8 @@ try:
     DEFAULT_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 except Exception:
     DEFAULT_API_KEY = ""
+# 화면에 나가는 오류 문구에서 키 값을 가리기 위해 등록한다
+register_secret(DEFAULT_API_KEY)
 
 # ── Sidebar ──
 with st.sidebar:
@@ -1475,6 +1479,58 @@ def render_send_preview(text: str) -> bool:
     return st.checkbox("위험 신호를 확인했고 그대로 전송합니다", key="risk_ack")
 
 
+def summarize_batch_send(items: list[tuple[str, str]]) -> tuple[list[dict], list[tuple[str, str]]]:
+    """일괄 전송 대상 (이름, 본문) 목록의 마스킹 후 본문과 학생별 위험 신호 건수를 만든다."""
+    send_map, _ = masked_ctx([t for _, t in items] + [major])
+    words = [w for w, _ in send_map]
+    rows, masked_items = [], []
+    for name, text in items:
+        masked = apply_mask(text or "", send_map)
+        risks = scan_identifying_risks(masked, words) if masked.strip() else []
+        rows.append(
+            {
+                "학생": name,
+                "위험 신호": len(risks),
+                "구분": ", ".join(dict.fromkeys(r["kind"] for r in risks)),
+            }
+        )
+        masked_items.append((name, masked))
+    return rows, masked_items
+
+
+def render_batch_send_preview(loader) -> None:
+    """일괄 모드(명렬표·여러 파일) 전송 전 안내: 마스킹 후 텍스트 미리보기 + 위험 신호 건수.
+
+    차단 게이트는 두지 않는다(단일 검토와 달리 학생 수만큼 확인이 번거로움). 파일 해석
+    비용이 있어 토글을 켰을 때만 본문을 읽는다. loader()는 [(이름, 본문)]을 돌려준다.
+    """
+    st.caption(
+        "🛡️ 일괄 모드도 전송 직전 마스킹(등록 단어·자동 탐지)이 적용됩니다. "
+        "전송될 텍스트와 위험 신호를 확인하려면 아래를 켜세요."
+    )
+    if not st.toggle("📤 일괄 전송 텍스트·위험 신호 미리보기", key="batch_send_preview"):
+        return
+    try:
+        items = loader()
+    except Exception as e:
+        st.warning(f"⚠️ 미리보기를 만들지 못했습니다: {safe_error(e)}")
+        return
+    rows, masked_items = summarize_batch_send(items)
+    total = sum(r["위험 신호"] for r in rows)
+    flagged = sum(1 for r in rows if r["위험 신호"])
+    if total:
+        st.warning(
+            f"⚠️ 위험 신호 총 **{total}건**(학생 {flagged}명). 필요하면 마스킹 목록에 등록하거나 "
+            "표현을 고친 뒤 실행하세요."
+        )
+    else:
+        st.caption("✅ 학생·학교를 특정할 만한 위험 신호를 찾지 못했습니다.")
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    with st.expander("마스킹 적용 후 전송 텍스트 (학생별 앞부분)"):
+        for name, masked in masked_items[:30]:
+            st.text(f"[{name}] " + masked[:300] + ("…" if len(masked) > 300 else ""))
+
+
 # ── 모드 선택 ──
 mode = st.radio(
     "모드를 선택하세요.",
@@ -1554,7 +1610,7 @@ if mode == "🔍 기재 금지 표현 검토":
                 else:
                     roster_df = pd.read_excel(io.BytesIO(f.getvalue()))
             except Exception as e:
-                st.error(f"❌ 명렬표를 읽지 못했습니다: {e}")
+                st.error(f"❌ 명렬표를 읽지 못했습니다: {safe_error(e)}")
                 roster_df = None
             if roster_df is not None and not roster_df.empty:
                 st.success(f"✅ 명렬표 로드 완료 ({len(roster_df):,}행)")
@@ -1597,7 +1653,7 @@ if mode == "🔍 기재 금지 표현 검토":
                     if "스캔" in str(e)
                     else ""
                 )
-                st.error(f"❌ 파일에서 텍스트를 추출하지 못했습니다: {e}{scan_hint}")
+                st.error(f"❌ 파일에서 텍스트를 추출하지 못했습니다: {safe_error(e)}{scan_hint}")
         elif len(review_files) > 1:
             st.info(f"📚 파일 **{len(review_files)}개** 업로드됨 — 반 전체 일괄 검토 모드")
     elif input_method == IMAGE_INPUT_METHOD:
@@ -1617,6 +1673,22 @@ if mode == "🔍 기재 금지 표현 검토":
     # 전송 전 개인정보 가드 — 단일 검토(붙여넣기·단일 파일·이미지 전사본)만 적용.
     # 일괄 모드(여러 파일·명렬표)는 input_text가 비어 있어 게이트가 없다(기존 마스킹 유지).
     send_ok = render_send_preview(input_text) if input_text.strip() else True
+    # 일괄 모드는 차단 게이트 대신 '전송 텍스트 미리보기 + 위험 신호 건수' 안내를 둔다.
+    if is_roster and not roster_mixed and roster_df is not None and not roster_df.empty:
+        render_batch_send_preview(
+            lambda: [
+                (n, t)
+                for n, t, _ in parse_roster_table(
+                    roster_df, roster_name_col, roster_text_col, roster_major_col
+                )
+            ]
+        )
+    elif len(review_files) > 1:
+        render_batch_send_preview(
+            lambda: [
+                (file_stem(f.name), read_uploaded_file(f)) for f in review_files
+            ]
+        )
 
     run = st.button(
         "🔍 검토 실행",
@@ -1681,7 +1753,7 @@ if mode == "🔍 기재 금지 표현 검토":
                 try:
                     inputs.append((stem, read_uploaded_file(f), "", ""))
                 except Exception as e:
-                    inputs.append((stem, "", str(e), ""))
+                    inputs.append((stem, "", safe_error(e), ""))
 
             batch_map, _ = masked_ctx([t for _, t, _, _ in inputs] + [major])
             st.session_state["batch_review"] = run_batch_review_pipeline(
@@ -1724,7 +1796,7 @@ if mode == "🔍 기재 금지 표현 검토":
                 except json.JSONDecodeError:
                     st.error("❌ Gemini 응답을 JSON으로 파싱하지 못했습니다. 다시 시도해 주세요.")
                 except Exception as e:
-                    st.error(f"❌ Gemini API 호출 실패: {e}")
+                    st.error(f"❌ Gemini API 호출 실패: {safe_error(e)}")
 
     # ── 검토 실행 전에도 입력 텍스트만으로 오탈자 검사 가능 ──
     if input_text.strip() and not st.session_state.get("review_result"):
@@ -1804,7 +1876,7 @@ if mode == "🔍 기재 금지 표현 검토":
                         )
                         record_history("수정본", st.session_state["revised_text"])
                     except Exception as e:
-                        st.error(f"❌ Gemini API 호출 실패: {e}")
+                        st.error(f"❌ Gemini API 호출 실패: {safe_error(e)}")
 
             revised = st.session_state.get("revised_text", "")
             if revised:
@@ -1868,7 +1940,7 @@ if mode == "🔍 기재 금지 표현 검토":
                             )
                             st.rerun()
                         except Exception as e:
-                            st.error(f"❌ 재검토 실패: {e}")
+                            st.error(f"❌ 재검토 실패: {safe_error(e)}")
 
         st.divider()
         render_quality_block(
@@ -2040,7 +2112,7 @@ if mode == "🔍 기재 금지 표현 검토":
                     )
                     return remove_mask(revised, bpost_map), ""
                 except Exception as e:
-                    return "", str(e)
+                    return "", safe_error(e)
 
             outs = run_parallel(len(targets), _revise_job, "수정본 생성 중…")
             for b, (revised, err) in zip(targets, outs):
@@ -2063,7 +2135,7 @@ if mode == "🔍 기재 금지 표현 검토":
                         "",
                     )
                 except Exception as e:
-                    return None, str(e)
+                    return None, safe_error(e)
 
             outs = run_parallel(len(ok), _quality_job, "품질 진단 중…")
             for b, (q, err) in zip(ok, outs):
@@ -2082,7 +2154,7 @@ if mode == "🔍 기재 금지 표현 검토":
                         it["correct"] = remove_mask(it["correct"], bpost_map)
                     return items, ""
                 except Exception as e:
-                    return None, str(e)
+                    return None, safe_error(e)
 
             outs = run_parallel(len(ok), _proofread_job, "오탈자 검사 중…")
             for b, (items, err) in zip(ok, outs):
@@ -2281,7 +2353,7 @@ else:
                         activity_raw = read_uploaded_file(activity_file)
                 except Exception as e:
                     st.warning(
-                        f"⚠️ 파일에서 읽을 수 있는 텍스트를 찾지 못했습니다: {e} "
+                        f"⚠️ 파일에서 읽을 수 있는 텍스트를 찾지 못했습니다: {safe_error(e)} "
                         "(스캔한 이미지 PDF는 텍스트가 없어 요약할 수 없습니다. "
                         "내용을 아래 칸에 직접 붙여넣어 주세요.)"
                     )
@@ -2311,7 +2383,7 @@ else:
                         )
                         st.session_state["activity_summary_auto"] = act_auto
                     except Exception as e:
-                        st.error(f"❌ 요약을 만들지 못했습니다: {e}")
+                        st.error(f"❌ 요약을 만들지 못했습니다: {safe_error(e)}")
 
         if st.session_state.get("activity_summary"):
             render_auto_mask_note(st.session_state.get("activity_summary_auto") or [])
@@ -2386,7 +2458,7 @@ else:
         try:
             txt = read_uploaded_file(f)
         except Exception as e:
-            st.warning(f"⚠️ 예시 세특 '{f.name}'에서 텍스트를 추출하지 못해 건너뜁니다: {e}")
+            st.warning(f"⚠️ 예시 세특 '{f.name}'에서 텍스트를 추출하지 못해 건너뜁니다: {safe_error(e)}")
             continue
         if txt.strip():
             style_examples.append(txt.strip()[:1500])
@@ -2423,7 +2495,7 @@ else:
             else:
                 eval_df = pd.read_excel(io.BytesIO(f.getvalue()))
         except Exception as e:
-            st.error(f"❌ 엑셀 자기평가서를 읽지 못했습니다: {e}")
+            st.error(f"❌ 엑셀 자기평가서를 읽지 못했습니다: {safe_error(e)}")
             eval_df = None
         if eval_df is not None and not eval_df.empty:
             st.success(f"✅ 엑셀 자기평가서 로드 완료 ({len(eval_df):,}행)")
@@ -2468,7 +2540,7 @@ else:
             else:
                 st.warning("⚠️ 파일에서 텍스트를 추출하지 못했습니다. 내용을 수행평가 입력란에 직접 붙여넣어 주세요.")
         except Exception as e:
-            st.error(f"❌ 파일에서 텍스트를 추출하지 못했습니다: {e}")
+            st.error(f"❌ 파일에서 텍스트를 추출하지 못했습니다: {safe_error(e)}")
     elif len(eval_files) > 1:
         st.info(f"📚 자기평가서 **{len(eval_files)}개** 업로드됨 — 학생별 일괄 생성 모드")
 
@@ -2549,7 +2621,7 @@ else:
                     try:
                         inputs.append((stem, read_uploaded_file(f), "", ""))
                     except Exception as e:
-                        inputs.append((stem, "", str(e), ""))
+                        inputs.append((stem, "", safe_error(e), ""))
 
             # 전송할 실제 텍스트(수행평가 + 전체 자기평가서 + 학생별 진로)에서
             # 개인정보 추가 탐지
@@ -2600,7 +2672,7 @@ else:
                     return {
                         "name": stem,
                         "draft": "",
-                        "error": str(e),
+                        "error": safe_error(e),
                         "major": eff_major,
                         "row_major": row_major,
                     }
@@ -2649,7 +2721,7 @@ else:
                         "",
                     )
                 except Exception as e:
-                    return ("", str(e))
+                    return ("", safe_error(e))
 
             if dual_draft:
                 # ── 2버전 동시 생성 ──
@@ -2769,7 +2841,7 @@ else:
                         st.session_state.pop("proofread_draft", None)
                         st.rerun()
                     except Exception as e:
-                        st.error(f"❌ Gemini API 호출 실패: {e}")
+                        st.error(f"❌ Gemini API 호출 실패: {safe_error(e)}")
 
         st.divider()
         render_quality_block(
@@ -2853,7 +2925,7 @@ else:
                         "",
                     )
                 except Exception as e:
-                    return None, str(e)
+                    return None, safe_error(e)
 
             outs = run_parallel(len(ok), _dq_job, "품질 진단 중…")
             for b, (q, err) in zip(ok, outs):
@@ -2872,7 +2944,7 @@ else:
                         it["correct"] = remove_mask(it["correct"], dpost_map)
                     return items, ""
                 except Exception as e:
-                    return None, str(e)
+                    return None, safe_error(e)
 
             outs = run_parallel(len(ok), _dp_job, "오탈자 검사 중…")
             for b, (items, err) in zip(ok, outs):

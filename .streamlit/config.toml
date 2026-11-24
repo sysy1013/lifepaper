@@ -6,3 +6,8 @@ backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F5F5F7"
 textColor = "#1A1A1A"
 font = "sans serif"
+
+# 처리되지 않은 예외의 메시지·스택트레이스를 화면에 내보내지 않는다
+# (예외 메시지에 API 키·학생 본문이 실릴 수 있음). 앱의 오류 안내는 core/security.safe_error 경유.
+[client]
+showErrorDetails = "none"
