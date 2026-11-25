@@ -299,3 +299,52 @@ def test_build_neis_workbook_empty_batch_has_sheet():
     data = build_neis_workbook([])
     xls = pd.ExcelFile(io.BytesIO(data))
     assert xls.sheet_names == ["나이스 입력"]
+
+
+# ── CSV/XLSX 수식 주입 방지 ──
+from core.formatting import neutralize_cell, neutralize_df, safe_csv_bytes  # noqa: E402
+
+
+def test_neutralize_cell_prefixes_formula_starts():
+    for s in ("=1+1", "+cmd", "-2+3", "@SUM(A1)", "\tx", "\rx", "  =HYPERLINK(\"x\")"):
+        assert neutralize_cell(s) == "'" + s
+
+
+def test_neutralize_cell_keeps_plain_text_and_numbers():
+    assert neutralize_cell("홍길동 학생은 탐구함") == "홍길동 학생은 탐구함"
+    assert neutralize_cell("a=b") == "a=b"
+    assert neutralize_cell(-3) == -3
+    assert neutralize_cell(-1.5) == -1.5
+    assert neutralize_cell(None) is None
+
+
+def test_neutralize_df_only_touches_strings():
+    df = pd.DataFrame({"이름": ["=evil()", "철수"], "점수": [-5, 3]})
+    out = neutralize_df(df)
+    assert out["이름"].tolist() == ["'=evil()", "철수"]
+    assert out["점수"].tolist() == [-5, 3]
+    assert df["이름"].tolist() == ["=evil()", "철수"]  # 원본 불변
+
+
+def test_safe_csv_bytes_neutralizes():
+    data = safe_csv_bytes(pd.DataFrame({"a": ["=1+1"], "b": [-1]})).decode("utf-8-sig")
+    assert "'=1+1" in data and ",-1" in data
+
+
+def test_workbooks_neutralize_formula_cells():
+    batch = [
+        {
+            "name": "=cmd|' /C calc'!A0",
+            "text": "@SUM(1)",
+            "error": "",
+            "findings": [{"word": "+x", "reason": "-y", "suggestion_1": "=z"}],
+            "revised": "",
+        }
+    ]
+    for data, sheet in (
+        (build_neis_workbook(batch, 500), "나이스 입력"),
+        (build_batch_workbook(batch, 500), "요약"),
+    ):
+        df = pd.read_excel(io.BytesIO(data), sheet_name=sheet)
+        for v in df.astype(str).values.ravel():
+            assert not v.lstrip().startswith(("=", "+", "@")), v

@@ -908,16 +908,33 @@ def transcribe_images_with_gemini(parts, api_key: str) -> str:
     return re.sub(r"^```[a-z]*\s*|\s*```$", "", raw.strip()).strip()
 
 
-def verify_transcription_with_gemini(parts, transcript: str, api_key: str) -> list[dict]:
-    """이미지와 전사본을 대조해 불일치 목록 [{transcript, image, note}]을 돌려준다."""
+def verify_transcription_with_gemini(
+    parts,
+    transcript: str,
+    api_key: str,
+    mask_map: list[tuple[str, str]] | None = None,
+) -> list[dict]:
+    """이미지와 전사본을 대조해 불일치 목록 [{transcript, image, note}]을 돌려준다.
+
+    mask_map이 주어지면 전사본 텍스트는 마스킹한 뒤 전송하고(이미지는 마스킹할 수 없어
+    그대로 전송된다), 응답의 토큰은 원래 표현으로 복원한다.
+    """
     contents = _to_parts(parts)
     if not contents:
         raise ValueError("대조할 이미지(또는 PDF)가 없습니다.")
     if not (transcript or "").strip():
         raise ValueError("대조할 전사본이 비어 있습니다.")
+    mask_map = mask_map or []
+    masked = apply_mask(transcript, mask_map)
     model = _make_vision_model(api_key, VERIFY_SYSTEM_PROMPT, json_mode=True)
+    note = (
+        "전사본의 《비공개n》 표시는 개인정보를 가린 자리이므로 차이로 보고하지 말라.\n"
+        if mask_map
+        else ""
+    )
     instruction = (
-        f"[전사본]\n{transcript}\n\n"
+        f"[전사본]\n{masked}\n\n"
+        f"{note}"
         "위 이미지와 전사본을 한 글자씩 대조해 차이를 JSON 배열로만 답하라."
     )
     parsed = _gemini_json(model, contents + [instruction])
@@ -925,9 +942,9 @@ def verify_transcription_with_gemini(parts, transcript: str, api_key: str) -> li
         raise ValueError("Gemini 응답이 JSON 배열 형식이 아닙니다.")
     return [
         {
-            "transcript": str(i.get("transcript", "")).strip(),
-            "image": str(i.get("image", "")).strip(),
-            "note": str(i.get("note", "")).strip(),
+            "transcript": remove_mask(str(i.get("transcript", "")).strip(), mask_map),
+            "image": remove_mask(str(i.get("image", "")).strip(), mask_map),
+            "note": remove_mask(str(i.get("note", "")).strip(), mask_map),
         }
         for i in parsed
         if isinstance(i, dict) and (i.get("transcript") or i.get("image"))

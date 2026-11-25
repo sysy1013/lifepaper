@@ -10,6 +10,45 @@ import pandas as pd
 from core.rules import neis_bytes
 
 # ──────────────────────────────────────────────
+# CSV/XLSX 수식 주입(formula injection) 방지
+# ──────────────────────────────────────────────
+# 엑셀·한셀·구글 시트는 =, +, -, @, 탭, CR 로 시작하는 셀을 수식으로 해석할 수 있다.
+# 학생 본문·Gemini 응답·파일명이 셀에 그대로 들어가므로 내보내기 직전에 무력화한다.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+# 앞쪽 공백: 일반 공백 + 전각 공백(U+3000) + NBSP(U+00A0). 보이지 않는 문자는 chr로 적는다.
+_LEADING_WS = " " + chr(0x3000) + chr(0x00A0)
+
+
+def neutralize_cell(v):
+    """문자열이 (앞 공백 뒤) 수식 시작 문자로 시작하면 작은따옴표를 붙여 텍스트로 만든다.
+
+    문자열이 아닌 값(숫자·None 등)은 그대로 둔다 — 숫자 열의 음수는 건드리지 않는다.
+    """
+    if not isinstance(v, str):
+        return v
+    stripped = v.lstrip(_LEADING_WS)
+    if stripped in ("-", "+"):
+        return v  # 빈 값 자리표시 '-'는 수식이 아니다
+    if stripped.startswith(_FORMULA_PREFIXES) or v.startswith(("\t", "\r")):
+        return "'" + v
+    return v
+
+
+def neutralize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """DataFrame의 모든 문자열 셀(과 문자열 열 이름)을 neutralize_cell로 처리한 사본."""
+    out = df.copy()
+    for col in out.columns:
+        if out[col].dtype == object or pd.api.types.is_string_dtype(out[col]):
+            out[col] = out[col].map(neutralize_cell)
+    out.columns = [neutralize_cell(c) for c in out.columns]
+    return out
+
+
+def safe_csv_bytes(df: pd.DataFrame) -> bytes:
+    """수식 주입을 무력화한 CSV(utf-8-sig, 인덱스 없음) 바이트."""
+    return neutralize_df(df).to_csv(index=False).encode("utf-8-sig")
+
+# ──────────────────────────────────────────────
 # 하이라이트 렌더링 / 분량 표시
 # ──────────────────────────────────────────────
 HIGHLIGHT_STYLE = "background-color: yellow; color: red; font-weight: bold;"
@@ -265,15 +304,15 @@ def build_batch_workbook(batch: list[dict], neis_limit: int = 0) -> bytes:
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        summary_df.to_excel(writer, sheet_name="요약", index=False)
+        neutralize_df(summary_df).to_excel(writer, sheet_name="요약", index=False)
         if batch:
-            detail_df.to_excel(writer, sheet_name="검출 상세", index=False)
+            neutralize_df(detail_df).to_excel(writer, sheet_name="검출 상세", index=False)
         if revised_rows:
-            pd.DataFrame(revised_rows).to_excel(
+            neutralize_df(pd.DataFrame(revised_rows)).to_excel(
                 writer, sheet_name="수정본", index=False
             )
         if quality_rows:
-            pd.DataFrame(quality_rows).to_excel(
+            neutralize_df(pd.DataFrame(quality_rows)).to_excel(
                 writer, sheet_name="품질 진단", index=False
             )
     return buf.getvalue()
@@ -315,5 +354,5 @@ def build_neis_workbook(batch: list[dict], neis_limit: int = 0) -> bytes:
 
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="나이스 입력", index=False)
+        neutralize_df(df).to_excel(writer, sheet_name="나이스 입력", index=False)
     return buf.getvalue()

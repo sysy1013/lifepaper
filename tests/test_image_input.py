@@ -241,6 +241,21 @@ def test_verify_transcription_parses_mismatches(fake_client):
     assert cls.last.models.calls[0]["config"].response_mime_type == "application/json"
 
 
+def test_verify_transcription_masks_transcript_and_restores(fake_client):
+    reply = json.dumps(
+        [{"transcript": "《비공개1》 학생은", "image": "《비공개1》 학생온", "note": "x"}],
+        ensure_ascii=False,
+    )
+    cls = fake_client(reply)
+    out = gemini.verify_transcription_with_gemini(
+        [(b"x", "image/png")], "홍길동 학생은 탐구함", "key", [("홍길동", "《비공개1》")]
+    )
+    sent = cls.last.models.calls[0]["contents"][-1]
+    assert "홍길동" not in sent and "《비공개1》" in sent
+    assert out[0]["transcript"] == "홍길동 학생은"
+    assert out[0]["image"] == "홍길동 학생온"
+
+
 def test_verify_requires_images_and_transcript():
     with pytest.raises(ValueError):
         gemini.verify_transcription_with_gemini([], "본문", "k")

@@ -1,13 +1,59 @@
-# 생기부 도우미 — macOS 스타일 디자인 시스템 테마
-# 시스템 블루 액센트가 라디오·체크박스·슬라이더·진행바에 네이티브로 반영된다.
+# 생기부 도우미 — '결재 서류' 테마
+# 잉크 블루(주요 동작) · 인주 레드(기재 불가) · 괘선 블루 · 명조 제목 + 시스템 한글 본문.
+# 라이트/다크를 모두 정의해 기기 설정(prefers-color-scheme)을 따른다.
+# 외부 웹폰트는 불러오지 않는다(제3자 요청 차단). 글꼴 이름은 기기에 설치된 경우에만 쓰인다.
 [theme]
-primaryColor = "#0D6FFF"
+font = "Pretendard, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', system-ui, sans-serif"
+headingFont = "'Noto Serif KR', 'Nanum Myeongjo', AppleMyungjo, Batang, serif"
+headingFontWeights = [700, 700, 700, 600, 600, 600]
+headingFontSizes = ["1.9rem", "1.45rem", "1.2rem", "1.05rem", "1rem", "0.95rem"]
+baseRadius = "10px"
+buttonRadius = "9px"
+showWidgetBorder = true
+
+[theme.light]
+primaryColor = "#2E4FA3"
+backgroundColor = "#F6F7FA"
+secondaryBackgroundColor = "#ECEFF5"
+textColor = "#1A2233"
+linkColor = "#2E4FA3"
+borderColor = "#D8DDE7"
+dataframeBorderColor = "#E3E7EF"
+dataframeHeaderBackgroundColor = "#EEF1F8"
+redColor = "#C23B2E"
+orangeColor = "#C2610C"
+yellowColor = "#A86B00"
+blueColor = "#2F6DB5"
+greenColor = "#2F7D4F"
+
+[theme.light.sidebar]
 backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F5F5F7"
-textColor = "#1A1A1A"
-font = "sans serif"
+secondaryBackgroundColor = "#F1F3F8"
+
+[theme.dark]
+primaryColor = "#8FA8EE"
+backgroundColor = "#12161D"
+secondaryBackgroundColor = "#1E242E"
+textColor = "#E6EAF0"
+linkColor = "#8FA8EE"
+borderColor = "#2C3440"
+dataframeBorderColor = "#2A313C"
+dataframeHeaderBackgroundColor = "#1E242E"
+redColor = "#EF7B6F"
+orangeColor = "#F0A060"
+yellowColor = "#E8C15A"
+blueColor = "#7FB0EC"
+greenColor = "#6CC48F"
+
+[theme.dark.sidebar]
+backgroundColor = "#171C24"
+secondaryBackgroundColor = "#202733"
 
 # 처리되지 않은 예외의 메시지·스택트레이스를 화면에 내보내지 않는다
 # (예외 메시지에 API 키·학생 본문이 실릴 수 있음). 앱의 오류 안내는 core/security.safe_error 경유.
 [client]
 showErrorDetails = "none"
+
+# 사용 통계(텔레메트리)를 Streamlit 측으로 보내지 않는다.
+[browser]
+gatherUsageStats = false
