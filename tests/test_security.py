@@ -20,6 +20,11 @@ from core.security import (
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 저장소에 키 형태 리터럴을 남기지 않도록 실행 시 조립한다.
+# 가짜 값(스캐너 오탐 방지: 조각으로 조립)
+_K1 = "abc" + "DEF" + "123456"
+_K2 = "k3y" + "-VAL" + "UE-998877"
+_K3 = "eyJh" + "bGci" + "OiJI" + ".pay" + "load"
+_K4 = "super" + "secret" + "999"
 FAKE_AQ = "AQ." + "FAKE" + "x7Kq9TestOnlyToken_zz"
 FAKE_AIZA = "AIza" + "SyFAKE0123456789abcdefghijklmnopq"
 
@@ -37,10 +42,10 @@ def _reset_registry():
     [
         (f"400 API key not valid: {FAKE_AIZA}", FAKE_AIZA),
         (f"token {FAKE_AQ} expired", FAKE_AQ),
-        (f"GET https://x.googleapis.com/v1/models?key=abcDEF123456&alt=json", "abcDEF123456"),
-        ("headers: {'x-goog-api-key': 'k3y-VALUE-998877'}", "k3y-VALUE-998877"),
-        ("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload", "eyJhbGciOiJIUzI1NiJ9.payload"),
-        ("api_key=supersecret999", "supersecret999"),
+        (f"GET https://x.googleapis.com/v1/models?key={_K1}&alt=json", _K1),
+        (f"headers: {{'x-goog-api-key': '{_K2}'}}", _K2),
+        (f"Authorization: Bearer {_K3}", _K3),
+        (f"api_key={_K4}", _K4),
     ],
 )
 def test_redact_patterns(raw, secret):
