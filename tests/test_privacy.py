@@ -120,3 +120,29 @@ def test_result_fields_and_offsets():
         assert set(r) == {"kind", "text", "start", "end", "advice"}
         assert text[r["start"]:r["end"]] == r["text"]
         assert r["advice"]
+
+
+import pytest as _pytest
+
+
+@_pytest.mark.parametrize(
+    "text,kind",
+    [
+        ("수원시 장안구에 거주하는 친구와 협업함.", KIND_REGION),
+        ("홍성군청에서 열린 행사에 참여함.", "지역명"),
+        ("경기도의 사례를 조사함.", "지역명"),
+        ("서울특별시에서 진행된 조사를 분석함.", "지역명"),
+        ("홍성읍에서 자료를 수집함.", "지역명"),
+        ("미래고등학교에서 활동한 경험을 정리함.", KIND_SCHOOL),
+    ],
+)
+def test_identifier_with_trailing_particle_is_detected(text, kind):
+    assert any(r["kind"] == kind for r in scan_identifying_risks(text))
+
+
+@_pytest.mark.parametrize(
+    "text",
+    ["인구에 대한 연구에서 탐구를 수행함.", "토론에서 시작이 중요함을 확인함.", "도읍에서는 군사 구조를 비교함."],
+)
+def test_particle_support_adds_no_false_positive(text):
+    assert not [r for r in scan_identifying_risks(text) if r["kind"] in ("지역명", "학교명")]
