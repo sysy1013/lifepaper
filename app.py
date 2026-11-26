@@ -15,16 +15,15 @@
 - 피드백 반영 재생성, 품질 진단, 초안 간 유사도 검사
 """
 
+import hashlib
 import hmac
 import io
-import json
 import re
 import zipfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -87,6 +86,13 @@ from core.ocr import (
 from core.privacy import scan_identifying_risks
 from core.security import register_secret, safe_error
 from core.project import replace_in_entries
+from core.lazy import lazy_module
+from core.review import (
+    AI_FAIL_CAPTION,
+    AI_FAIL_TITLE,
+    ai_failure_message,
+    build_rules_only_result,
+)
 from core.report import (
     REPORT_COLUMNS,
     JUDGMENT_BADGE,
@@ -119,6 +125,9 @@ from core.undo import UNDO_DEPTH  # noqa: F401  (되돌리기 스택 최대 깊�
 from core.undo import has_undo as _has_undo
 from core.undo import pop_undo as _pop_undo
 from core.undo import push_undo as _push_undo
+
+# pandas는 표를 그릴 때 처음 불러온다(첫 화면 import 지연 방지).
+pd = lazy_module("pandas")
 
 # ──────────────────────────────────────────────
 # 페이지 기본 설정
@@ -317,6 +326,7 @@ def run_batch_review_pipeline(
                 "major": eff_major,
                 "row_major": row_major,
             }
+        segments: list = []
         try:
             # '과목명: 내용'이 여러 개면 과목별로 나눠 검토하고 subject를 태깅한다.
             segments = split_by_subject(text)
@@ -334,16 +344,20 @@ def run_batch_review_pipeline(
                 "text": text,
                 "findings": findings,
                 "segments": segments,
+                "ai_ok": True,
                 "error": "",
                 "major": eff_major,
                 "row_major": row_major,
             }
         except Exception as e:
+            # AI 호출 실패 → 키 없이 도는 규칙 기반 결과만이라도 남긴다(ai_ok=False).
+            result = build_rules_only_result(
+                text, segments, custom_words, mask_map, ai_failure_message(e)
+            )
             return {
                 "name": stem,
-                "text": "",
-                "findings": [],
-                "error": safe_error(e),
+                **result,
+                "error": "",
                 "major": eff_major,
                 "row_major": row_major,
             }
@@ -354,6 +368,22 @@ def run_batch_review_pipeline(
 # ──────────────────────────────────────────────
 # 문체·상투 표현 점검 결과 표시
 # ──────────────────────────────────────────────
+def render_ai_failure_notice(message: str, names: list[str] | None = None) -> None:
+    """AI 검토 실패 안내 (규칙 기반 결과만 표시 중). message는 safe_error로 가린 문구."""
+    body = f"**⚠️ {AI_FAIL_TITLE}**"
+    if names:
+        body += "\n\n대상: " + ", ".join(names)
+    if message:
+        body += f"\n\n{message}"
+    body += (
+        "\n\n아래 규칙 기반 검사(금지 패턴·교사 판단 힌트·문체 점검·오류 리포트)는 "
+        "API 키 없이 계산된 결과입니다. API 키·크레딧을 확인한 뒤 "
+        "**🔍 검토 실행**을 다시 누르면 AI 검토를 재시도합니다."
+    )
+    st.warning(body)
+    st.caption(f"🤖 {AI_FAIL_CAPTION}")
+
+
 def render_style_warnings(text: str) -> None:
     """문체 점검 결과를 표시한다."""
     warnings = style_check(text)
@@ -483,13 +513,26 @@ IMAGE_CONSENT_NOTICE = (
 )
 
 
+IMAGE_PARTS_CACHE_KEY = "_image_parts_cache"
+IMAGE_PARTS_CACHE_MAX = 20
+
+
 def _image_parts(files) -> tuple[list[tuple[bytes, str]], list[tuple[str, bytes | None]]]:
     """업로드 파일을 검증·전처리해 (Gemini 전송용 parts, 미리보기 목록)을 돌려준다."""
     validate_uploads([(f.name, f.size) for f in files])
     parts: list[tuple[bytes, str]] = []
     previews: list[tuple[str, bytes | None]] = []
+    # 전처리(축소·재인코딩) 결과를 이 세션 안에서만 캐시한다(글자 읽기·대조 검증 클릭마다
+    # 다시 계산하지 않도록). 서버 전역 캐시는 쓰지 않으며 '모두 지우기'로 함께 지워진다.
+    cache = st.session_state.setdefault(IMAGE_PARTS_CACHE_KEY, {})
     for f in files:
-        data, mime = prepare_image(f.getvalue(), mime_for_name(f.name))
+        raw = f.getvalue()
+        key = (f.name, f.size, hashlib.sha256(raw).hexdigest())
+        if key not in cache:
+            if len(cache) >= IMAGE_PARTS_CACHE_MAX:
+                cache.clear()
+            cache[key] = prepare_image(raw, mime_for_name(f.name))
+        data, mime = cache[key]
         parts.append((data, mime))
         # 미리보기는 축소·재인코딩된 이미지만 보관한다(PDF는 파일명만).
         previews.append((f.name, data if mime.startswith("image/") else None))
@@ -615,11 +658,36 @@ def render_image_input(api_key: str) -> str:
 # ──────────────────────────────────────────────
 # 학생 간 유사도 검사 결과 표시
 # ──────────────────────────────────────────────
+SIMILARITY_CACHE_KEY = "_similarity_cache"
+SIMILARITY_CACHE_MAX = 8
+
+
+def similar_pairs_cached(items: list[tuple[str, str]]) -> list[tuple[str, str, float]]:
+    """find_similar_pairs 결과를 이 세션 안에서만 캐시한다 (rerun마다 O(N²) 재계산 방지).
+
+    키는 (이름, 본문) 목록의 SHA-256 해시. 서버 전역 캐시(st.cache_*)는 다른 사용자와
+    공유될 수 있어 쓰지 않으며, '모두 지우기'(clear_all_session)로 함께 지워진다.
+    """
+    h = hashlib.sha256()
+    for name, text in items:
+        for part in (name, text):
+            b = (part or "").encode("utf-8")
+            h.update(len(b).to_bytes(8, "big"))
+            h.update(b)
+    key = h.hexdigest()
+    cache = st.session_state.setdefault(SIMILARITY_CACHE_KEY, {})
+    if key not in cache:
+        if len(cache) >= SIMILARITY_CACHE_MAX:
+            cache.clear()
+        cache[key] = find_similar_pairs(items)
+    return list(cache[key])
+
+
 def render_similarity_check(items: list[tuple[str, str]]) -> None:
     """학생 간 유사도 검사 결과를 표시한다."""
     if len(items) < 2:
         return
-    pairs = find_similar_pairs(items)
+    pairs = similar_pairs_cached(items)
     if pairs:
         st.error(
             f"🚨 **학생 간 유사도 경고 {len(pairs)}쌍** — 생기부에 동일·유사 문장이 "
@@ -1989,12 +2057,20 @@ if mode == "🔍 기재 금지 표현 검토":
                         "text": input_text,
                         "findings": findings,
                         "segments": segments,
+                        "ai_ok": True,
                     }
                     record_history(f"검토: {len(findings)}건 검출", input_text)
-                except json.JSONDecodeError:
-                    st.error("❌ Gemini 응답을 JSON으로 파싱하지 못했습니다. 다시 시도해 주세요.")
                 except Exception as e:
-                    st.error(f"❌ Gemini API 호출 실패: {safe_error(e)}")
+                    # AI 실패(키·크레딧·할당량·네트워크·JSON) → 규칙 기반 결과만 표시한다.
+                    # ai_ok=False로 저장해 성공 결과와 구분하고, 검토 실행 버튼으로 바로 재시도할 수 있다.
+                    rules_only = build_rules_only_result(
+                        input_text, segments, custom_words, single_map, ai_failure_message(e)
+                    )
+                    st.session_state["review_result"] = rules_only
+                    record_history(
+                        f"검토(규칙 기반만 — AI 실패): {len(rules_only['findings'])}건 검출",
+                        input_text,
+                    )
 
     # ── 검토 실행 전에도 입력 텍스트만으로 오탈자 검사 가능 ──
     if input_text.strip() and not st.session_state.get("review_result"):
@@ -2015,6 +2091,8 @@ if mode == "🔍 기재 금지 표현 검토":
         render_undo_button(
             "review_result", "재검토 이전 결과", "undo_review", container=head_r
         )
+        if not review.get("ai_ok", True):
+            render_ai_failure_notice(review.get("ai_error", ""))
 
         # 이 검토 본문에 대한 확장 마스킹 맵 (수정본·품질·오탈자 모두 이 맵을 공유)
         rev_map, rev_auto = masked_ctx([review["text"], major])
@@ -2178,6 +2256,11 @@ if mode == "🔍 기재 금지 표현 검토":
         ok = [b for b in batch_review if not b["error"]]
         if failed:
             st.error("❌ 검토 실패: " + ", ".join(b["name"] for b in failed))
+        ai_failed = [b for b in ok if not b.get("ai_ok", True)]
+        if ai_failed:
+            # 같은 원인(키·크레딧)이면 메시지가 같으므로 중복을 줄여 보여 준다.
+            msgs = list(dict.fromkeys(b.get("ai_error", "") for b in ai_failed if b.get("ai_error")))
+            render_ai_failure_notice(" / ".join(msgs), [b["name"] for b in ai_failed])
 
         # 개인정보 마스킹 자동 제안 (반 전체 텍스트 기반)
         render_mask_suggestions(
@@ -2236,6 +2319,8 @@ if mode == "🔍 기재 금지 표현 검토":
             }
             if has_own_major:
                 row["진로"] = entry_major(b)
+            if ai_failed:
+                row["AI 검토"] = "완료" if b.get("ai_ok", True) else "실패(규칙 기반만)"
             if b.get("quality"):
                 avg = quality_avg(b["quality"])
                 row["품질(5점)"] = f"{avg:.1f}" if avg is not None else "-"
@@ -2448,7 +2533,11 @@ if mode == "🔍 기재 금지 표현 검토":
             b_findings = filter_ignored(b["findings"], ignored_now)
             n_found = len(b_findings)
             label = f"📄 {b['name']} — {len(b['text']):,}자, 검출 {n_found}건"
+            if not b.get("ai_ok", True):
+                label += " (규칙 기반만)"
             with st.expander(label):
+                if not b.get("ai_ok", True):
+                    st.caption(f"🤖 AI 검토 실패 — 규칙 기반 결과만 표시. {AI_FAIL_CAPTION}")
                 if has_own_major:
                     st.caption(f"🎯 희망 진로: {entry_major(b)}")
                 if b_findings:

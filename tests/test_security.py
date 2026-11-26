@@ -163,7 +163,12 @@ def test_app_never_shows_api_key_on_gemini_error(monkeypatch):
     finally:
         os.chdir(old)
     screen = _all_text(at)
-    assert at.error, "오류 안내가 표시되어야 함"
+    # AI 실패는 규칙 기반 결과와 함께 경고 콜아웃으로 안내한다(core.review.AI_FAIL_TITLE).
+    from core.review import AI_FAIL_TITLE
+
+    assert at.error or any(AI_FAIL_TITLE in str(w.value) for w in at.warning), (
+        "오류 안내가 표시되어야 함"
+    )
     assert FAKE_AQ not in screen
     assert "FAKEx7Kq9" not in screen
 

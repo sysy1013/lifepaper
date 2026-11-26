@@ -1596,13 +1596,21 @@ def find_similar_pairs(
     items: list[tuple[str, str]], threshold: float = SIMILARITY_THRESHOLD
 ) -> list[tuple[str, str, float]]:
     """(이름, 텍스트) 목록에서 유사도가 임계값을 넘는 쌍을 찾는다."""
-    pairs = []
+    found = []
     normalized = [(name, _normalize_for_similarity(t)) for name, t in items]
-    for i in range(len(normalized)):
-        for j in range(i + 1, len(normalized)):
-            ratio = difflib.SequenceMatcher(
-                None, normalized[i][1], normalized[j][1]
-            ).ratio()
+    # 비교 순서·인자 순서는 기존과 같다(a=i, b=j). seq2(b)의 색인을 j마다 한 번만 만들고,
+    # ratio()의 상한인 real_quick_ratio()·quick_ratio()가 임계값 미만이면 비싼 ratio()를
+    # 건너뛴다 — 상한이므로 결과는 기존과 동일하다.
+    sm = difflib.SequenceMatcher(None)
+    for j in range(1, len(normalized)):
+        sm.set_seq2(normalized[j][1])
+        for i in range(j):
+            sm.set_seq1(normalized[i][1])
+            if sm.real_quick_ratio() < threshold or sm.quick_ratio() < threshold:
+                continue
+            ratio = sm.ratio()
             if ratio >= threshold:
-                pairs.append((normalized[i][0], normalized[j][0], ratio))
-    return sorted(pairs, key=lambda p: -p[2])
+                found.append((i, j, ratio))
+    # 기존 순서(유사도 내림차순, 같으면 (i, j) 사전순)를 그대로 재현한다.
+    found.sort(key=lambda p: (-p[2], p[0], p[1]))
+    return [(normalized[i][0], normalized[j][0], r) for i, j, r in found]

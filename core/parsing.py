@@ -9,8 +9,11 @@ import zipfile
 import zlib
 from collections import Counter
 
-import olefile
-import pandas as pd
+from core.lazy import lazy_module
+
+# pandas·olefile은 표/HWP를 실제로 다룰 때 처음 불러온다(첫 화면 import 지연 방지).
+pd = lazy_module("pandas")
+olefile = lazy_module("olefile")
 
 
 # ──────────────────────────────────────────────

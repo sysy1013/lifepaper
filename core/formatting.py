@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
 """하이라이트 HTML 렌더링 / 검토 결과 DataFrame 변환."""
 
+from __future__ import annotations
+
 import html
 import io
 import re
 
-import pandas as pd
-
+from core.lazy import lazy_module
 from core.rules import neis_bytes
+
+# pandas는 표·엑셀을 만들 때 처음 불러온다(첫 화면 import 지연 방지).
+pd = lazy_module("pandas")
 
 # ──────────────────────────────────────────────
 # CSV/XLSX 수식 주입(formula injection) 방지

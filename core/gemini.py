@@ -1,17 +1,66 @@
 # -*- coding: utf-8 -*-
 """Gemini 클라이언트 어댑터 + 프롬프트 + LLM 호출 로직 (검토/수정/품질/초안/교정/분량)."""
 
+import hashlib
 import json
 import random
 import re
+import threading
 import time
 
-from google import genai
-from google.genai import types as genai_types
-
 from core.masking import apply_mask, remove_mask
+from core.review import merge_findings, rule_findings_for_review, unmask_findings
 from core.rules import HINT_TO_CATEGORY, rule_based_filter
 from core.security import sanitize_exception
+
+
+# google-genai SDK는 import에 수 초가 걸리므로(첫 화면 지연) 처음 호출할 때 불러온다.
+# 모듈 속성 gemini.genai / gemini.genai_types 접근도 지연 import로 그대로 동작한다(PEP 562).
+def _genai():
+    from google import genai
+
+    return genai
+
+
+def _types():
+    from google.genai import types
+
+    return types
+
+
+def __getattr__(name: str):
+    if name == "genai":
+        return _genai()
+    if name == "genai_types":
+        return _types()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+# genai.Client 생성은 SSL 컨텍스트 로드로 느리다 → API 키별로 하나를 재사용한다.
+# 캐시 키는 키 원문 대신 SHA-256 해시를 쓴다(메모리 덤프·repr에 키가 드러나지 않게).
+# Client 클래스 자체도 키에 넣어, 테스트가 Client를 바꿔 끼우면 새로 만든다.
+_CLIENT_CACHE: dict[tuple, object] = {}
+_CLIENT_LOCK = threading.Lock()
+_CLIENT_CACHE_MAX = 4
+
+
+def _get_client(api_key: str):
+    client_cls = _genai().Client
+    cache_key = (client_cls, hashlib.sha256((api_key or "").encode("utf-8")).hexdigest())
+    with _CLIENT_LOCK:
+        client = _CLIENT_CACHE.get(cache_key)
+        if client is None:
+            if len(_CLIENT_CACHE) >= _CLIENT_CACHE_MAX:
+                _CLIENT_CACHE.clear()
+            client = client_cls(api_key=api_key)
+            _CLIENT_CACHE[cache_key] = client
+        return client
+
+
+def clear_client_cache() -> None:
+    """재사용 중인 Gemini Client를 모두 버린다 (테스트·키 교체용)."""
+    with _CLIENT_LOCK:
+        _CLIENT_CACHE.clear()
 
 MODEL_CHOICES = {
     "균형 (3.0 Flash — 권장)": "gemini-3-flash-preview",
@@ -45,17 +94,17 @@ class _GeminiModel:
     """google-genai Client를 감싸 기존 .generate_content(prompt) 인터페이스를 유지한다."""
 
     def __init__(self, api_key: str, system_instruction: str, config: dict):
-        self._client = genai.Client(api_key=api_key)
+        self._client = _get_client(api_key)
         self._system_instruction = system_instruction
         self._config_kwargs = dict(config)
-        self._config = genai_types.GenerateContentConfig(
+        self._config = _types().GenerateContentConfig(
             system_instruction=system_instruction, **config
         )
 
-    def _config_without_thinking_config(self) -> genai_types.GenerateContentConfig:
+    def _config_without_thinking_config(self):
         """thinking_config를 뺀 동일 설정 (사고 끄기를 거부하는 모델용 폴백)."""
         kwargs = {k: v for k, v in self._config_kwargs.items() if k != "thinking_config"}
-        return genai_types.GenerateContentConfig(
+        return _types().GenerateContentConfig(
             system_instruction=self._system_instruction, **kwargs
         )
 
@@ -93,7 +142,7 @@ def _make_model(
     if json_mode:
         config["response_mime_type"] = "application/json"
     if not thinking:
-        config["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=0)
+        config["thinking_config"] = _types().ThinkingConfig(thinking_budget=0)
     return _GeminiModel(api_key, system_instruction, config)
 
 
@@ -269,8 +318,14 @@ FEWSHOT_K = 6
 UNVERIFIED_NOTE = "근거 미확인"
 
 
-def build_analyze_prompts(text: str, major: str, use_fewshot: bool = True) -> tuple[str, str]:
-    """(system_prompt, user_prompt) 조립 (순수 함수). use_fewshot=False면 기존과 동일."""
+def build_analyze_prompts(
+    text: str, major: str, use_fewshot: bool = True, rule_findings=None
+) -> tuple[str, str]:
+    """(system_prompt, user_prompt) 조립 (순수 함수). use_fewshot=False면 기존과 동일.
+
+    rule_findings: 같은 text에 대한 rule_based_filter(text) 결과(사용자 금칙어 없이).
+    주어지면 다시 계산하지 않는다(review_text의 중복 규칙 검사 제거용).
+    """
     user_prompt = (
         f"[학생의 희망 진로/학과]\n{major if major.strip() else '미입력'}\n\n"
         f"[심사 대상 생기부 텍스트]\n{text}\n\n"
@@ -280,8 +335,10 @@ def build_analyze_prompts(text: str, major: str, use_fewshot: bool = True) -> tu
         return SYSTEM_PROMPT, user_prompt
     from core.fewshot import format_fewshot_block, rulebook_excerpt, select_fewshots
 
+    if rule_findings is None:
+        rule_findings = rule_based_filter(text)
     hints = {
-        HINT_TO_CATEGORY.get(f.get("rule_id"), f.get("rule_id")) for f in rule_based_filter(text)
+        HINT_TO_CATEGORY.get(f.get("rule_id"), f.get("rule_id")) for f in rule_findings
     }
     shots = select_fewshots(text, k=FEWSHOT_K, hint_categories=hints)
     user_prompt = (
@@ -307,7 +364,7 @@ def _validate_cited_rule(entry: dict, item: dict) -> None:
 
 
 def analyze_with_gemini(
-    text: str, major: str, api_key: str, use_fewshot: bool = True
+    text: str, major: str, api_key: str, use_fewshot: bool = True, rule_findings=None
 ) -> list[dict]:
     """전체 텍스트와 희망 진로를 Gemini에 전달하여 위반 표현 목록(JSON)을 받아온다.
 
@@ -315,7 +372,9 @@ def analyze_with_gemini(
     cited_rule이 rulebook에 실제로 있는지 검증한다(키 추가만, 기존 키 유지).
     use_fewshot=False: 기존 프롬프트·반환 형식 그대로.
     """
-    system_prompt, user_prompt = build_analyze_prompts(text, major, use_fewshot)
+    system_prompt, user_prompt = build_analyze_prompts(
+        text, major, use_fewshot, rule_findings=rule_findings
+    )
     model = _make_model(
         api_key, system_prompt, temperature=0.2, json_mode=True, thinking=False
     )
@@ -361,15 +420,16 @@ def _only_in_book_titles(text: str, entry: dict) -> bool:
 
 def review_text(text: str, major: str, api_key: str, custom_words: list[str]) -> list[dict]:
     """규칙 기반 + Gemini 심사를 실행하고 병합된 위반 목록을 반환한다."""
-    rule_findings = rule_based_filter(text, custom_words)
-    gemini_findings = analyze_with_gemini(text, major, api_key)
-
-    merged: dict[str, dict] = {}
-    for item in rule_findings:
-        merged[item["word"]] = {**item, "severity": "주의", "source": "규칙 기반"}
-    for item in gemini_findings:
-        merged[item["word"]] = {**item, "source": "Gemini 심사"}
-    return list(merged.values())
+    raw_rules = rule_based_filter(text, custom_words)
+    # 사용자 금칙어가 없으면 few-shot 힌트용 rule_based_filter(text) 결과와 똑같으므로 재사용한다.
+    # (금칙어가 있으면 seen·spans가 달라 힌트 집합이 바뀔 수 있어 따로 계산한다.)
+    has_custom = any((w or "").strip() for w in (custom_words or []))
+    gemini_findings = analyze_with_gemini(
+        text, major, api_key, rule_findings=None if has_custom else raw_rules
+    )
+    return merge_findings(
+        rule_findings_for_review(text, custom_words, raw_rules), gemini_findings
+    )
 
 
 def review_text_masked(
@@ -390,11 +450,7 @@ def review_text_masked(
         api_key,
         custom_words,
     )
-    for f in findings:
-        for k in ("word", "reason", "basis", "suggestion_1", "suggestion_2"):
-            if f.get(k):
-                f[k] = remove_mask(f[k], mask_map)
-    return findings
+    return unmask_findings(findings, mask_map)
 
 
 def review_text_masked_multi(
@@ -867,7 +923,7 @@ def _to_parts(parts) -> list:
     for p in parts or []:
         if isinstance(p, tuple):
             data, mime = p
-            out.append(genai_types.Part.from_bytes(data=data, mime_type=mime))
+            out.append(_types().Part.from_bytes(data=data, mime_type=mime))
         else:
             out.append(p)
     return out
@@ -875,6 +931,7 @@ def _to_parts(parts) -> list:
 
 def _make_vision_model(api_key: str, system_instruction: str, json_mode: bool = False):
     """이미지 판독용 모델: temperature 0, 사고 끔, (SDK가 지원하면) 고해상도 판독."""
+    genai_types = _types()
     config: dict = {
         "temperature": 0.0,
         "thinking_config": genai_types.ThinkingConfig(thinking_budget=0),
