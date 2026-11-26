@@ -28,6 +28,6 @@ def test_config_disables_usage_stats():
 
 
 def test_verdict_cell_style_maps_known_verdicts():
-    assert "#C23B2E" in theme.verdict_cell_style("기재 불가")
+    assert "#B42318" in theme.verdict_cell_style("기재 불가")
     assert theme.verdict_cell_style("통과") == "" or "통과" in theme.VERDICT_CLASS
     assert theme.verdict_cell_style("확인 필요 · 교사 판단 필요") == theme.VERDICT_CELL_STYLE["교사 판단 필요"]

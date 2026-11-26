@@ -113,7 +113,7 @@ from core.theme import (
     render_side_label,
     render_step,
     render_verdict_chips,
-    verdict_cell_style,
+    verdict_cell_style_themed,
 )
 from core.undo import UNDO_DEPTH  # noqa: F401  (되돌리기 스택 최대 깊이)
 from core.undo import has_undo as _has_undo
@@ -417,7 +417,7 @@ def render_issue_report(
     df = pd.DataFrame(report_table_rows(rows), columns=list(REPORT_COLUMNS))
     # 화면 표시만: 판정 칸 색 배지 + 판정을 앞쪽에 배치 (CSV 열 순서는 그대로)
     st.dataframe(
-        df.style.map(verdict_cell_style, subset=["판정"]),
+        df.style.map(verdict_cell_style_themed, subset=["판정"]),
         use_container_width=True,
         hide_index=True,
         column_order=["판정", "줄", "문장", "과목", "구분", "원문", "오류 내용", "수정 제안", "근거"],
@@ -1369,8 +1369,8 @@ st.session_state.setdefault("ignored_words", [])
 # UI 구성
 # ──────────────────────────────────────────────
 render_brand_header(
-    "교육부 「학교생활기록부 기재요령」 기준으로 기재 금지 표현을 검출·수정하고, "
-    "수행평가 자료와 학생 자기평가서를 활용해 세특 초안을 작성·진단합니다."
+    "「학교생활기록부 기재요령」 기준으로 기재 금지 표현을 찾아 고치고, "
+    "수행평가·자기평가서로 세특 초안을 씁니다."
 )
 
 # secrets.toml(.gitignore 처리됨)에 저장된 키가 있으면 자동 사용

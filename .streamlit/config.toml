@@ -1,53 +1,53 @@
-# 생기부 도우미 — '결재 서류' 테마
-# 잉크 블루(주요 동작) · 인주 레드(기재 불가) · 괘선 블루 · 명조 제목 + 시스템 한글 본문.
+# 생기부 도우미 — 담백한 뉴트럴 + 인디고 포인트 1색
+# 흰 바탕 · 회색 채움 입력창 · 1px 헤어라인 · 인디고(주요 동작·선택·포커스)만 강조.
 # 라이트/다크를 모두 정의해 기기 설정(prefers-color-scheme)을 따른다.
 # 외부 웹폰트는 불러오지 않는다(제3자 요청 차단). 글꼴 이름은 기기에 설치된 경우에만 쓰인다.
 [theme]
 font = "Pretendard, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', system-ui, sans-serif"
-headingFont = "'Noto Serif KR', 'Nanum Myeongjo', AppleMyungjo, Batang, serif"
+headingFont = "Pretendard, 'Apple SD Gothic Neo', 'Malgun Gothic', 'Noto Sans KR', system-ui, sans-serif"
 headingFontWeights = [700, 700, 700, 600, 600, 600]
-headingFontSizes = ["1.9rem", "1.45rem", "1.2rem", "1.05rem", "1rem", "0.95rem"]
-baseRadius = "10px"
-buttonRadius = "9px"
-showWidgetBorder = true
+headingFontSizes = ["1.75rem", "1.375rem", "1.125rem", "1rem", "0.9375rem", "0.875rem"]
+baseRadius = "12px"
+buttonRadius = "12px"
+showWidgetBorder = false
 
 [theme.light]
-primaryColor = "#2E4FA3"
-backgroundColor = "#F6F7FA"
-secondaryBackgroundColor = "#ECEFF5"
-textColor = "#1A2233"
-linkColor = "#2E4FA3"
-borderColor = "#D8DDE7"
-dataframeBorderColor = "#E3E7EF"
-dataframeHeaderBackgroundColor = "#EEF1F8"
-redColor = "#C23B2E"
-orangeColor = "#C2610C"
-yellowColor = "#A86B00"
-blueColor = "#2F6DB5"
-greenColor = "#2F7D4F"
+primaryColor = "#3B5BDB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F4F6"
+textColor = "#191F28"
+linkColor = "#3B5BDB"
+borderColor = "#E5E8EB"
+dataframeBorderColor = "#E5E8EB"
+dataframeHeaderBackgroundColor = "#F7F8FA"
+redColor = "#D92D20"
+orangeColor = "#E04F16"
+yellowColor = "#DC6803"
+blueColor = "#3B5BDB"
+greenColor = "#079455"
 
 [theme.light.sidebar]
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F1F3F8"
+backgroundColor = "#F9FAFB"
+secondaryBackgroundColor = "#EDEFF2"
 
 [theme.dark]
-primaryColor = "#8FA8EE"
-backgroundColor = "#12161D"
-secondaryBackgroundColor = "#1E242E"
-textColor = "#E6EAF0"
-linkColor = "#8FA8EE"
-borderColor = "#2C3440"
-dataframeBorderColor = "#2A313C"
-dataframeHeaderBackgroundColor = "#1E242E"
-redColor = "#EF7B6F"
-orangeColor = "#F0A060"
-yellowColor = "#E8C15A"
-blueColor = "#7FB0EC"
-greenColor = "#6CC48F"
+primaryColor = "#4263EB"
+backgroundColor = "#0F1115"
+secondaryBackgroundColor = "#1D2129"
+textColor = "#E8EAED"
+linkColor = "#91A7FF"
+borderColor = "#262B33"
+dataframeBorderColor = "#262B33"
+dataframeHeaderBackgroundColor = "#161A20"
+redColor = "#F97066"
+orangeColor = "#F38744"
+yellowColor = "#FDB022"
+blueColor = "#91A7FF"
+greenColor = "#47CD89"
 
 [theme.dark.sidebar]
-backgroundColor = "#171C24"
-secondaryBackgroundColor = "#202733"
+backgroundColor = "#13161B"
+secondaryBackgroundColor = "#1D2129"
 
 # 처리되지 않은 예외의 메시지·스택트레이스를 화면에 내보내지 않는다
 # (예외 메시지에 API 키·학생 본문이 실릴 수 있음). 앱의 오류 안내는 core/security.safe_error 경유.
